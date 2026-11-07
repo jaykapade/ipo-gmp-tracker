@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C4", "DTZ", "UP"]
+ignore = ["E501", "B008"]
+fixable = ["E", "F", "I", "B", "C4", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]

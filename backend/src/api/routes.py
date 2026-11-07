@@ -1,0 +1,342 @@
+"""HTTP routes for the IPO Checker API."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+
+from src import config
+from src.api.schemas import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    DuplicatePairOut,
+    GMPPoint,
+    HealthResponse,
+    IPODetail,
+    IPOPage,
+    IPOSummary,
+    ReportInfo,
+)
+from src.database import db
+from src.models.analysis import IPOAnalysis
+from src.pipeline import analyze_pipeline
+from src.reporting import generate_report
+from src.utils.dedupe import find_duplicate_pairs
+
+router = APIRouter(prefix="/api")
+
+
+def _db_path(request: Request) -> str | Path | None:
+    return request.app.state.db_path
+
+
+def _report_dir(request: Request) -> Path:
+    return Path(request.app.state.report_dir)
+
+
+def require_token(
+    request: Request,
+    x_api_token: str | None = Header(default=None, alias="X-API-Token"),
+) -> None:
+    """Protect mutating endpoints when ``API_TOKEN`` is configured."""
+
+    expected = getattr(request.app.state, "api_token", None)
+    if expected and x_api_token != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing X-API-Token header.",
+        )
+
+
+def _summary_from_scored_row(row: dict[str, Any]) -> IPOSummary:
+    return IPOSummary(
+        id=int(row["id"]),
+        name=row["name"],
+        category=row.get("category"),
+        status=row.get("status"),
+        sector=row.get("sector"),
+        exchange=row.get("exchange"),
+        issue_price=row.get("issue_price"),
+        issue_price_lower=row.get("issue_price_lower"),
+        issue_price_upper=row.get("issue_price_upper"),
+        estimated_listing_price=row.get("estimated_listing_price"),
+        ipo_size_cr=row.get("ipo_size_cr"),
+        lot_size=row.get("lot_size"),
+        subscription=row.get("subscription"),
+        pe=row.get("pe"),
+        gmp=row.get("latest_gmp"),
+        gmp_percent=row.get("latest_gmp_percent"),
+        gmp_percent_derived=bool(row.get("latest_gmp_percent_derived")),
+        latest_gmp_source=row.get("latest_gmp_source"),
+        latest_gmp_recorded_at=row.get("latest_gmp_recorded_at"),
+        open_date=row.get("open_date"),
+        close_date=row.get("close_date"),
+        listing_date=row.get("listing_date"),
+        source_url=row.get("source_url"),
+    )
+
+
+def _summary_from_ipo_row(
+    row: dict[str, Any],
+    latest: dict[str, Any] | None,
+) -> IPOSummary:
+    latest = latest or {}
+    gmp = latest.get("gmp")
+    gmp_percent = latest.get("gmp_percent")
+    derived = False
+
+    issue_price = row.get("issue_price")
+    if gmp_percent is None and gmp is not None and issue_price:
+        gmp_percent = (float(gmp) * 100.0) / float(issue_price)
+        derived = True
+
+    return IPOSummary(
+        id=int(row["id"]),
+        name=row["name"],
+        category=row.get("category"),
+        status=row.get("status"),
+        sector=row.get("sector"),
+        exchange=row.get("exchange"),
+        issue_price=issue_price,
+        issue_price_lower=row.get("issue_price_lower"),
+        issue_price_upper=row.get("issue_price_upper"),
+        estimated_listing_price=row.get("estimated_listing_price"),
+        ipo_size_cr=row.get("ipo_size_cr"),
+        lot_size=row.get("lot_size"),
+        subscription=row.get("subscription"),
+        pe=row.get("pe"),
+        gmp=gmp,
+        gmp_percent=gmp_percent,
+        gmp_percent_derived=derived,
+        latest_gmp_source=latest.get("source"),
+        latest_gmp_recorded_at=latest.get("recorded_at"),
+        open_date=row.get("open_date"),
+        close_date=row.get("close_date"),
+        listing_date=row.get("listing_date"),
+        source_url=row.get("source_url"),
+    )
+
+
+def _report_info(path: Path) -> ReportInfo:
+    stat = path.stat()
+    return ReportInfo(
+        filename=path.name,
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(
+            stat.st_mtime,
+            tz=UTC,
+        ).isoformat(),
+        download_url=f"/api/reports/{path.name}",
+    )
+
+
+@router.get("", tags=["meta"])
+def api_index() -> dict[str, str]:
+    return {
+        "name": "IPO Checker API",
+        "docs": "/docs",
+        "health": "/api/health",
+    }
+
+
+@router.get("/health", response_model=HealthResponse, tags=["meta"])
+def health(request: Request) -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        database=str(_db_path(request) or config.DB_PATH),
+        generated_at=datetime.now(UTC).isoformat(),
+    )
+
+
+@router.get("/ipos", response_model=IPOPage, tags=["ipos"])
+def list_ipos(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
+    min_gmp: float | None = Query(default=None, ge=0),
+) -> IPOPage:
+    rows = db.list_ipos(
+        status=status,
+        min_gmp_percent=min_gmp,
+        limit=limit,
+        offset=offset,
+        db_path=_db_path(request),
+    )
+    total = db.count_ipos(
+        status=status,
+        min_gmp_percent=min_gmp,
+        db_path=_db_path(request),
+    )
+
+    return IPOPage(
+        items=[_summary_from_scored_row(row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/ipos/{ipo_id}", response_model=IPODetail, tags=["ipos"])
+def get_ipo(request: Request, ipo_id: int) -> IPODetail:
+    row = db.get_ipo(ipo_id, db_path=_db_path(request))
+    if row is None:
+        raise HTTPException(status_code=404, detail="IPO not found")
+
+    history = db.get_gmp_history(
+        ipo_id,
+        limit=100,
+        db_path=_db_path(request),
+    )
+    latest = history[0] if history else None
+    summary = _summary_from_ipo_row(row, latest)
+
+    return IPODetail(
+        **summary.model_dump(),
+        rhp_url=row.get("rhp_url"),
+        gmp_history=[
+            GMPPoint(
+                source=item["source"],
+                gmp=item.get("gmp"),
+                gmp_percent=item.get("gmp_percent"),
+                recorded_at=item["recorded_at"],
+            )
+            for item in history
+        ],
+        latest_analysis=db.get_latest_analysis(
+            ipo_id,
+            db_path=_db_path(request),
+        ),
+    )
+
+
+@router.get(
+    "/candidates",
+    response_model=list[IPOAnalysis],
+    tags=["analysis"],
+)
+def list_candidates(
+    request: Request,
+    min_gmp: float | None = Query(default=None, ge=0),
+    include_upcoming: bool | None = Query(default=None),
+) -> list[IPOAnalysis]:
+    run = analyze_pipeline(
+        min_gmp_percent=min_gmp,
+        include_upcoming=include_upcoming,
+        persist=False,
+        db_path=_db_path(request),
+    )
+    return run.analyses
+
+
+@router.post(
+    "/analyze",
+    response_model=AnalyzeResponse,
+    dependencies=[Depends(require_token)],
+    tags=["analysis"],
+)
+def run_analysis(
+    request: Request,
+    body: AnalyzeRequest | None = None,
+) -> AnalyzeResponse:
+    payload = body or AnalyzeRequest()
+    run = analyze_pipeline(
+        min_gmp_percent=payload.min_gmp_percent,
+        include_upcoming=payload.include_upcoming,
+        persist=payload.persist,
+        db_path=_db_path(request),
+    )
+    return AnalyzeResponse(count=len(run.analyses), analyses=run.analyses)
+
+
+@router.get("/reports", response_model=list[ReportInfo], tags=["reports"])
+def list_reports(request: Request) -> list[ReportInfo]:
+    report_dir = _report_dir(request)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(
+        report_dir.glob("*.pdf"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return [_report_info(path) for path in files if path.is_file()]
+
+
+@router.post(
+    "/reports",
+    response_model=ReportInfo,
+    dependencies=[Depends(require_token)],
+    tags=["reports"],
+)
+def create_report(
+    request: Request,
+    body: AnalyzeRequest | None = None,
+) -> ReportInfo:
+    payload = body or AnalyzeRequest()
+    run = analyze_pipeline(
+        min_gmp_percent=payload.min_gmp_percent,
+        include_upcoming=payload.include_upcoming,
+        persist=True,
+        db_path=_db_path(request),
+    )
+
+    report_dir = _report_dir(request)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    filename = (
+        f"ipo_report_{run.generated_at.strftime('%Y%m%d_%H%M%S_%f')}.pdf"
+    )
+
+    path = generate_report(
+        run.analyses,
+        output_path=report_dir / filename,
+        min_gmp_percent=run.min_gmp_percent,
+        include_upcoming=run.include_upcoming,
+        generated_at=run.generated_at,
+    )
+    return _report_info(path)
+
+
+@router.get("/reports/{filename}", tags=["reports"])
+def download_report(request: Request, filename: str) -> FileResponse:
+    safe_name = Path(filename).name
+    if safe_name != filename or not safe_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    path = _report_dir(request) / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=safe_name,
+    )
+
+
+@router.get(
+    "/quality/duplicates",
+    response_model=list[DuplicatePairOut],
+    tags=["quality"],
+)
+def possible_duplicates(
+    request: Request,
+    threshold: float = Query(default=90.0, ge=0, le=100),
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> list[DuplicatePairOut]:
+    rows = db.list_ipos(limit=limit, db_path=_db_path(request))
+    pairs = find_duplicate_pairs(rows, threshold=threshold)
+
+    return [
+        DuplicatePairOut(
+            first_id=pair.first_id,
+            first_name=pair.first_name,
+            second_id=pair.second_id,
+            second_name=pair.second_name,
+            score=pair.score,
+        )
+        for pair in pairs
+    ]

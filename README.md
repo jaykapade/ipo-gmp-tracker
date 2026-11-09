@@ -3,16 +3,16 @@
 A Python toolkit for collecting Indian IPO data (GMP, pricing, dates, status) from
 public sources, storing it in SQLite, screening for high-GMP opportunities, producing
 an analysed PDF report that is emailed automatically, and eventually exposing a
-**Next.js dashboard with a local-LLM chat assistant** for asking questions about
-current IPOs.
+**Next.js dashboard with an LLM chat assistant** that can run on local or cloud
+models, for asking questions about current IPOs.
 
 > **Status: working prototype.**
 > Scraping, SQLite persistence with numbered migrations and source provenance,
 > the 20% GMP filter, deterministic analysis, PDF reporting, optional SMTP email,
-> the read-only FastAPI service, the CLI, and the test suite work. The local-AI
-> layer and web frontend do not exist yet. The research specification for the
-> overview/in-depth analysis, PDF deep links and local-model layer lives in
-> [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
+> the read-only FastAPI service, the CLI, and the test suite work. The AI layer
+> and web frontend do not exist yet. The research specification for the
+> overview/in-depth analysis, PDF deep links and provider-agnostic AI layer lives
+> in [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
 > [Roadmap / TODO](#roadmap--todo) for the agreed next steps.
 >
 > **Disclaimer:** This project is for personal research and automation. It is **not**
@@ -39,7 +39,7 @@ current IPOs.
   - [3. Minimum GMP of 20% or more](#3-minimum-gmp-of-20-or-more)
   - [4. Complete the IPO analysis](#4-complete-the-ipo-analysis)
   - [5. Generate a PDF and email it](#5-generate-a-pdf-and-email-it)
-  - [6. Add local-AI enrichment](#6-add-local-ai-enrichment)
+  - [6. Add AI enrichment (local or cloud)](#6-add-ai-enrichment-local-or-cloud)
   - [7. Build the Next.js frontend and IPO chat](#7-build-the-nextjs-frontend-and-ipo-chat)
   - [8. Research-grade overview, financial analysis and PDF deep links](#8-research-grade-overview-financial-analysis-and-pdf-deep-links)
   - [Cross-cutting engineering tasks](#cross-cutting-engineering-tasks)
@@ -63,7 +63,7 @@ current IPOs.
 | **Email** | `src/reporting/emailer.py` sends the PDF over SMTP (TLS by default) to comma-separated `EMAIL_TO` recipients. `--dry-run` validates the message without connecting. |
 | **CLI** | `python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
 | **Tests** | `pytest` suite covering name normalisation, number/date parsing, active-status logic, the IPO Watch mapping, DB upserts/query helpers, analysis scoring/checklists, PDF generation, email dry-runs and the CLI. |
-| **Local AI** | Not implemented. Planned as an **optional, local-only** layer (Ollama / llama.cpp / LM Studio) for RHP extraction, analysis narratives, entity matching and chat. No cloud calls. Must never replace deterministic filters or calculations. Model names are pending the user's installation. |
+| **AI (local or cloud)** | Not implemented. Planned as an **optional, provider-agnostic** layer for RHP extraction, analysis narratives, entity matching and chat. One common interface selects Ollama / LM Studio / llama.cpp locally, or OpenAI / Anthropic / Gemini / any OpenAI-compatible endpoint in the cloud. Switching is config-only. Local is the default; cloud requires explicit opt-in. Must never replace deterministic filters or calculations. |
 | **Web frontend** | Not implemented. Planned Next.js dashboard with an **Overview** tab and an **In-depth** financial-analysis tab per IPO, GMP charts, reports, and a streaming chat UI. |
 | **API** | Implemented read-only FastAPI service (`python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
 
@@ -131,7 +131,7 @@ IPO Checker/
 │   │       └── parsing.py         # numbers, dates, date ranges, status logic
 │   └── tests/                     # pytest suite (inside backend/)
 ├── frontend/                      # planned: Next.js frontend (currently empty)
-├── docker-compose.yml             # planned: api + web + ollama
+├── docker-compose.yml             # planned: api + web + optional local model runtime
 └── backend/.venv/                 # local virtualenv (gitignored)
 ```
 
@@ -363,12 +363,16 @@ EMAIL_FROM=you@example.com
 EMAIL_TO=you@example.com
 EMAIL_SUBJECT_PREFIX=[IPO Checker]
 
-# Local AI (Ollama by default; AI stays optional)
+# AI (optional; local or cloud through one provider interface)
 LLM_ENABLED=false
-LLM_PROVIDER=ollama
+LLM_PROVIDER=ollama            # ollama | lmstudio | llamacpp | openai | anthropic | gemini | openai-compatible
 LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=                   # required only for cloud providers
 LLM_MODEL=qwen2.5:7b-instruct
+LLM_EMBED_PROVIDER=ollama      # may differ from the chat provider
 LLM_EMBED_MODEL=nomic-embed-text
+LLM_FALLBACK_PROVIDERS=        # optional chain, e.g. ollama,openai
+LLM_ALLOW_CLOUD=false          # explicit opt-in before documents leave the machine
 LLM_TEMPERATURE=0
 LLM_TIMEOUT_SECONDS=120
 LLM_MAX_CONTEXT=8192
@@ -383,7 +387,13 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
 Add `.env.example` to the repo and keep real `.env` files gitignored (already
 covered by `.gitignore`). AI must remain **off by default** so the scrape → analyse →
-report → email pipeline works on a machine with no GPU or model runtime.
+report → email pipeline works on a machine with no GPU, model runtime, or API key.
+
+Switching AI providers is a **config change, not a code change**. The same prompts,
+JSON schemas, citation checks and cache keys are used everywhere. Local providers are
+the default; cloud providers are opt-in and should only receive data you are
+comfortable sending to that vendor. The `LLM_*` keys are documented ahead of the AI
+layer; the core pipeline ignores them until it lands.
 
 ---
 
@@ -416,8 +426,9 @@ These are the gaps that remain after the backend P1 hardening pass. Resolved ite
    authentication beyond the optional `X-API-Token` on mutating endpoints.
 10. **No document store.** RHP/DRHP PDFs are not fetched, parsed, chunked, or
     indexed, so there is nothing for an AI layer to cite.
-11. **No AI guardrails or evaluation.** No prompt versioning, schema validation,
-    caching, citation tracking, or golden-set tests exist yet.
+11. **No AI provider abstraction, guardrails or evaluation.** There is no common
+    local/cloud provider interface, prompt versioning, schema validation, caching,
+    citation tracking, or golden-set tests yet.
 
 ---
 
@@ -441,35 +452,87 @@ delivery must stay deterministic and testable.
 selection, scoring math, DB upserts, email delivery, authentication, or anything that
 must be reproducible and auditable.
 
-### Local model choices
+### Model choices: local and cloud
 
-| Role | Suggested local model | Notes |
-| --- | --- | --- |
-| Chat / reasoning / extraction | 7B–14B instruct model, Q4 quantised (e.g. Qwen2.5 7B/14B, Llama 3.1 8B, Gemma 3 12B, or newer equivalents) | 8 GB VRAM handles 7–8B comfortably; 12 GB+ is better for 14B. |
-| Embeddings / RAG | `nomic-embed-text`, `bge-m3`, or `e5` | Small, fast, runs on CPU. |
-| Optional reranker | `bge-reranker` class model | Improves retrieval over long RHP documents. |
+| Deployment | Examples | Best for | Trade-offs |
+| --- | --- | --- | --- |
+| **Local** | Ollama, LM Studio, llama.cpp, vLLM; Qwen2.5 7B/14B, Llama 3.1 8B, Gemma 3 12B, or newer equivalents | Privacy, offline use, no per-token cost, full control over documents | Needs RAM/VRAM and time; smaller models reason less well |
+| **Cloud** | OpenAI, Anthropic, Google Gemini, Azure OpenAI, AWS Bedrock, OpenRouter, Groq | Stronger reasoning, long context, no local GPU | Per-token cost, data leaves the machine, rate limits, vendor terms |
+| **Embeddings** | Local: `nomic-embed-text`, `bge-m3`, `e5`. Cloud: OpenAI, Gemini, Voyage | Local is cheap and private; cloud is convenient at scale | Keep the embedding model stable when switching chat models |
+| **Optional reranker** | Local `bge-reranker`; cloud Cohere Rerank or similar | Better retrieval over long RHP documents | Extra latency and cost |
 
-Run them with **Ollama** (simplest on Windows, OpenAI-compatible API at
-`http://localhost:11434/v1`), llama.cpp, or LM Studio. Keep the model behind a small
-provider interface so a cloud model can be added later without changing callers.
-Local inference keeps scraped documents and research on-device, with no API keys or
-per-token cost; the trade-off is hardware and speed.
+**Seamless switching design**
+
+- **One internal contract.** Every provider implements
+  `generate(messages, response_schema) -> validated object`, `embed(texts) -> vectors`,
+  `health()` and `capabilities()`. Callers import the interface, never a vendor SDK.
+- **OpenAI-compatible adapter first.** It covers Ollama, LM Studio, llama.cpp server,
+  vLLM, OpenAI, OpenRouter, Groq and compatible gateways. Native adapters exist only
+  where the API differs materially (for example Anthropic or Gemini).
+- **Config-only selection.** `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`,
+  `LLM_API_KEY` and `LLM_FALLBACK_PROVIDERS` choose the provider. No caller changes.
+- **Same behaviour everywhere.** Prompt versions, JSON schemas, citation validation,
+  caching and evaluation are shared, so a cloud answer is checked exactly like a
+  local one.
+- **Capability flags.** `json_mode`, `tools`, `embeddings`, `vision`, `context_window`
+  and `cost` let features degrade gracefully when a provider lacks something.
+- **Optional fallback chain.** If the preferred provider is down, the next one in
+  `LLM_FALLBACK_PROVIDERS` can run — but a fallback to cloud is logged and never
+  silent.
+- **Mix and match.** Chat can run on a cloud model while embeddings stay local (or
+  the reverse), which is often the best privacy/cost balance.
+- **Provenance per call.** Every output stores provider, model, prompt version,
+  token counts and cost, so switching never mixes up which model produced what.
+- **Local-first default.** Cloud is disabled unless `LLM_ALLOW_CLOUD=true`.
+
+Switching from a local model to a cloud provider is just an env change — no
+application code changes:
+
+```ini
+# Local (default)
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen2.5:7b-instruct
+LLM_API_KEY=
+LLM_ALLOW_CLOUD=false
+
+# Cloud (OpenAI-compatible)
+LLM_PROVIDER=openai
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=<cloud-model-name>
+LLM_API_KEY=<your-key>
+LLM_ALLOW_CLOUD=true
+```
+
+Anthropic and Gemini use the same `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY`
+contract through their native adapters.
 
 ### AI guardrails
 
 - **Schema-constrained output** (JSON mode + pydantic validation); reject
   unparseable output and fall back to templates.
-- **Prompt versioning and caching** keyed by content hash, model, and prompt version.
+- **Prompt versioning and caching** keyed by content hash, provider, model, and
+  prompt version.
 - **Citations required** for any claim sourced from an RHP or news item.
 - **Treat scraped documents as untrusted data**, never as instructions — they can
   contain prompt-injection text.
 - **No raw SQL from the model.** It may only call whitelisted functions such as
   `search_ipos(filters)`, `get_ipo(id)`, `get_gmp_history(id, days)`,
   `compare_ipos(ids)`, and `get_analysis(id)`.
-- **Store provenance** for every AI output: model, prompt version, inputs, raw
-  output, citations, and creation time.
-- **Graceful degradation:** if the model is missing or slow, the rest of the
-  pipeline still works and the UI shows "AI unavailable".
+- **Store provenance** for every AI output: provider, model, prompt version,
+  inputs, raw output, citations, token counts, cost, and creation time.
+- **Local-first, cloud opt-in.** `LLM_ALLOW_CLOUD=false` blocks cloud providers
+  unless explicitly enabled. Never silently fall back from local to cloud.
+- **Data minimisation.** Send only the chunks needed, redact secrets/PII, and keep
+  an allowlist of document types that may leave the machine.
+- **Per-provider controls.** API keys stay server-side; set timeouts, retries,
+  rate limits, token/cost budgets, and a data-retention/region policy.
+- **Audit every call.** Record whether data left the machine, which provider saw
+  it, and how much it cost.
+- **Same validation everywhere.** Cloud output gets the same schema, citation and
+  hallucination checks as local output.
+- **Graceful degradation:** if the selected provider is missing, unconfigured or
+  slow, the rest of the pipeline still works and the UI shows "AI unavailable".
 - **No investment advice.** Answers must show data timestamps and the standard
   disclaimer, and must not tell the user to buy or sell.
 
@@ -480,8 +543,9 @@ per-token cost; the trade-off is hardware and speed.
 ```
 Next.js frontend/  ──HTTP + SSE──▶  FastAPI backend/api  ──▶  SQLite data/
    dashboard                        │
-   IPO detail                       ├──▶  Ollama (chat + embeddings)
-   chat UI                          ├──▶  backend/llm (RAG, extraction, cache)
+   IPO detail                       ├──▶  AI providers (local or cloud)
+   chat UI                          ├──▶  backend/llm (provider interface, RAG,
+                                    │                   extraction, cache)
                                     └──▶  backend/reporting (PDF + email)
 
 Scheduled job (backend/src/main.py): scrape → analyse → filter (GMP ≥ 20%) → report → email
@@ -493,7 +557,7 @@ Scheduled job (backend/src/main.py): scrape → analyse → filter (GMP ≥ 20%)
 | --- | --- | --- |
 | **Web app** | Next.js (App Router) + TypeScript + Tailwind + shadcn/ui + Recharts | Dashboard, IPO detail, GMP charts, analysis, report downloads, streaming chat. |
 | **API** | FastAPI + pydantic | Read-only data endpoints, chat streaming, protected admin actions (scrape/report). |
-| **AI layer** | Ollama + `backend/llm` | Embeddings, RAG, structured extraction, narrative generation, caching. |
+| **AI layer** | Provider-agnostic `backend/llm`: local (Ollama, LM Studio, llama.cpp) or cloud (OpenAI, Anthropic, Gemini, OpenAI-compatible) | One interface for embeddings, RAG, structured extraction, narrative generation, caching and provider switching. |
 | **Chat layer** | `backend/chat` + AI SDK `useChat` | Intent → whitelisted tool calls → grounded answer with citations. |
 | **Pipeline** | Existing Python modules + `backend/src/main.py` | Scrape, normalise, persist, filter, analyse, render, email. |
 
@@ -503,8 +567,8 @@ Implemented today: `GET /api/ipos`, `GET /api/ipos/{id}` (including GMP history,
 provenance and the latest analysis), `GET /api/candidates`, `GET`/`POST /api/reports`,
 `GET /api/reports/{filename}`, `GET /api/quality/duplicates` and `GET /api/health`.
 `POST /api/analyze` and `POST /api/reports` are token-protected. Search/sort, the
-overview/in-depth financial endpoints, chat streaming, admin scrape and Ollama health
-are still planned.
+overview/in-depth financial endpoints, chat streaming, admin scrape and AI provider
+health are still planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -517,7 +581,7 @@ are still planned.
 | `GET` | `/api/reports` | Generated report history + download URLs. |
 | `POST` | `/api/chat` | Streaming (SSE) chat grounded in current IPO data. |
 | `POST` | `/api/admin/scrape` | Trigger a scrape; token-protected, disabled by default. |
-| `GET` | `/api/health` | DB, scheduler, Ollama availability. |
+| `GET` | `/api/health` | DB, scheduler, and configured AI provider availability. |
 
 ### Chat design ("talk to current IPOs")
 
@@ -546,7 +610,7 @@ If the data does not exist, the assistant must say so rather than guess.
 ### Local deployment
 
 ```bash
-# 1. Start the model runtime
+# 1. Start the local model runtime (optional; skip for a cloud provider)
 ollama serve
 ollama pull qwen2.5:7b-instruct
 ollama pull nomic-embed-text
@@ -558,9 +622,12 @@ uvicorn src.api.main:app --host 127.0.0.1 --port 8000
 cd web && npm install && npm run dev
 ```
 
-A `docker-compose.yml` (api + web + ollama + volume for `data/`) is planned so the
-whole stack starts with one command. Bind services to localhost by default; never
-expose the API or Ollama publicly without authentication.
+To use a cloud provider instead, set `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`
+and `LLM_ALLOW_CLOUD=true`. No code changes are needed; local Ollama remains the
+default. A `docker-compose.yml` (api + web + optional local model runtime + volume
+for `data/`) is planned so the whole stack starts with one command. Bind services
+to localhost by default; never expose the API or a local model runtime publicly
+without authentication.
 
 ---
 
@@ -692,23 +759,37 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
   - [ ] Optional scheduling (Task Scheduler / cron / APScheduler).
   - [ ] GMP trend charts in the PDF.
 
-### 6. Add local-AI enrichment
+### 6. Add AI enrichment (local or cloud)
 
 All AI features are **optional and non-blocking**; `LLM_ENABLED=false` must keep the
-pipeline fully functional.
+pipeline fully functional. Local and cloud providers sit behind one interface, so
+switching is config-only.
 
-- [ ] **P1 — Provider abstraction.** `backend/llm/client.py` with an Ollama-first,
-      OpenAI-compatible backend, timeouts, retries, and a `NullProvider` fallback.
+- [ ] **P1 — Provider abstraction.** `backend/llm/client.py` +
+      `backend/llm/providers/` with a common `LLMProvider` contract
+      (`generate`, `embed`, `health`, `capabilities`), an OpenAI-compatible adapter
+      (Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, Groq), native
+      Anthropic/Gemini adapters where needed, timeouts, retries, and a
+      `NullProvider` fallback.
+- [ ] **P1 — Seamless provider switching.** Config-only selection
+      (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`,
+      `LLM_FALLBACK_PROVIDERS`), capability flags, shared prompts/schemas/cache, and
+      independent chat and embedding providers.
+- [ ] **P1 — Cloud safety.** `LLM_ALLOW_CLOUD=false` by default; explicit opt-in;
+      data minimisation and redaction; per-provider rate limits, budgets, region and
+      retention settings; audit provider/model/tokens/cost per call.
 - [ ] **P1 — Structured extraction.** JSON-schema prompts + pydantic validation for
       RHP/DRHP fields (objects of issue, risk factors, financials, red flags).
 - [ ] **P1 — Document ingestion + RAG.** Fetch RHP PDFs, extract text with page
-      numbers, chunk (≈800–1200 tokens, overlap), embed locally, and store
-      `documents` / `document_chunks` with citations.
+      numbers, chunk (≈800–1200 tokens, overlap), embed with the configured
+      embedding provider (local by default), and store `documents` /
+      `document_chunks` with citations.
 - [ ] **P1 — Narrative generation.** Convert computed metrics into strengths, risks,
-      and a verdict explanation; persist with model/prompt version in
+      and a verdict explanation; persist provider/model/prompt version in
       `analysis_reports`.
 - [ ] **P1 — Evaluation harness.** A golden set of RHP questions and expected facts;
-      measure extraction accuracy, citation validity, and hallucination rate.
+      measure extraction accuracy, citation validity, and hallucination rate across
+      local and cloud models, including cost and latency.
 - [ ] **P2 — Entity-resolution embeddings** to suggest cross-source name matches for
       the review queue.
 - [ ] **P2 — Parser-failure fallback** for changed HTML/PDF layouts, gated behind
@@ -733,8 +814,9 @@ pipeline fully functional.
 - [ ] **P1 — Chat UI.** Streaming messages, suggested prompts, citation chips,
       "data as of" timestamp, and disclaimer banner.
 - [ ] **P2 — Reports page.** List, download, and optionally re-email generated PDFs.
-- [ ] **P2 — Local deployment.** `docker-compose.yml` for api + web + ollama with a
-      persistent `data/` volume and health checks; localhost-only by default.
+- [ ] **P2 — Local deployment.** `docker-compose.yml` for api + web + optional local
+      model runtime with a persistent `data/` volume and health checks;
+      localhost-only by default.
 - [ ] **P2 — Security.** Bearer-token or session auth for any non-localhost access,
       rate limiting on chat, and no secrets in the client bundle.
 - [ ] **P2 — Quality.** API tests, Playwright end-to-end tests, loading/error/empty
@@ -743,9 +825,10 @@ pipeline fully functional.
 ### 8. Research-grade overview, financial analysis and PDF deep links
 
 These are the next product goals. The full specification lives in
-[`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). **All AI in
-this section must run on local models only**; the user will install the models and
-confirm the exact names before the AI parts are implemented.
+[`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). AI runs through
+a **single provider interface**: local models (Ollama / LM Studio / llama.cpp) are
+the default, and cloud providers (OpenAI / Anthropic / Gemini / OpenAI-compatible)
+are opt-in. Switching is a config change, not a code change.
 
 - [ ] **P1 — Overview + in-depth split in the app.**
   - [ ] **Overview tab**: company/business snapshot, issue structure, price band,
@@ -778,16 +861,23 @@ confirm the exact names before the AI parts are implemented.
   - [ ] Add `APP_BASE_URL` config (default `http://localhost:3000`); never put
         secrets or API tokens in the PDF.
   - [ ] Keep the detailed per-IPO PDF as the downloadable in-depth report.
-- [ ] **P1 — Local-model-only AI layer.**
-  - [ ] Provider abstraction (`backend/llm/client.py`) targeting Ollama,
-        llama.cpp or LM Studio. **No cloud model calls.**
+- [ ] **P1 — Provider-agnostic AI layer.**
+  - [ ] Common interface for local and cloud providers (`generate`, `embed`,
+        `health`, `capabilities`); OpenAI-compatible adapter plus native
+        Anthropic/Gemini adapters where needed.
+  - [ ] Config-only switching (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`,
+        `LLM_API_KEY`, `LLM_FALLBACK_PROVIDERS`); callers never import a vendor SDK.
+  - [ ] Local-first default; `LLM_ALLOW_CLOUD=false` unless explicitly enabled;
+        never silently send documents to a cloud provider.
+  - [ ] Same prompts, JSON schemas, citation checks, caching and evaluation across
+        providers; store provider/model/prompt version with every output.
   - [ ] `LLM_ENABLED=false` falls back to deterministic templates, so the core
         pipeline still works without a model.
   - [ ] Five summaries (Business Quality, Financial Health, Valuation, Risk/Red
         Flags, Overall Assessment) with evidence, conclusion, confidence, missing
         information and citations.
-  - [ ] Wait for the user to confirm the installed model names/VRAM, then set
-        `LLM_MODEL` and `LLM_EMBED_MODEL`.
+  - [ ] Wait for the user to confirm local model names/VRAM and cloud
+        keys/regions, then set the provider config.
   - [ ] Add prompt versioning, schema validation, caching, citation checks and a
         golden-set evaluation before trusting any generated narrative.
 - [ ] **P2 — Post-listing feedback loop.**
@@ -809,7 +899,7 @@ confirm the exact names before the AI parts are implemented.
 - [ ] **P1 — API contract** documented via FastAPI's OpenAPI schema and shared
       TypeScript types generated for `frontend/`.
 - [ ] **P1 — Demo/seed mode** so the frontend can be developed without live scrapes
-      or a local model.
+      or an AI provider.
 - [ ] **P1 — Logging** via `logging`/`rich`; one log line per IPO and a run summary.
 - [x] **P1 — Tests** (`pytest`) for normalisation, parsing, status logic, IPO Watch
       mapping and DB upserts/query helpers.
@@ -889,8 +979,9 @@ The project is considered "working" when a single command (or one local stack) c
    with an **Overview** tab and an **In-depth** financial-analysis tab per IPO.
 8. Generate a **summary PDF** that lists the shortlist and deep-links (URL + QR)
    into the app for the full analysis.
-9. Answer free-text questions about current IPOs through a **local** LLM, with
-   citations, data timestamps, and no raw-SQL access.
-10. Run every AI feature on local models only, with the core pipeline working even
-    when no model runtime is available.
+9. Answer free-text questions about current IPOs through the configured LLM
+   provider (local or cloud), with citations, data timestamps, and no raw-SQL access.
+10. Switch between local and cloud AI providers through **config only**, with
+    local-first defaults, explicit cloud opt-in, and the core pipeline working even
+    when no provider is available.
 11. Start the whole stack locally with one command.

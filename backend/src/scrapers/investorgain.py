@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
+
 import requests
 
 from src import config
-from src.database.db import save_ipo_with_gmp
 from src.models.ipo import IPO
-from src.utils.http import create_session
+from src.scrapers.base import BaseScraper, payload_rows
+from src.scrapers.errors import ParseError
 from src.utils.normalization import normalize_name
 from src.utils.parsing import (
     clean_text,
@@ -24,44 +26,59 @@ URL = config.INVESTORGAIN_URL
 logger = logging.getLogger(__name__)
 
 
+class InvestorGainScraper(BaseScraper):
+    """Scraper for the undocumented InvestorGain report endpoint."""
+
+    source_name = SOURCE
+
+    def fetch(self) -> Any:
+        return self.get_json(URL)
+
+    def rows(self, payload: Any) -> list[Any]:
+        return payload_rows(payload, "reportTableData")
+
+    def convert_row(self, ipo_data: dict) -> IPO:
+        name = clean_text(ipo_data.get("~ipo_name"))
+        if not name:
+            raise ParseError("InvestorGain row has no IPO name")
+
+        return IPO(
+            name=name,
+            normalized_name=normalize_name(name),
+            ipo_id=parse_int(ipo_data.get("~id")),
+            category=clean_text(ipo_data.get("~IPO_Category")),
+            gmp=parse_float(ipo_data.get("~max_gmp1")),
+            gmp_percent=parse_float(ipo_data.get("~gmp_percent_calc")),
+            issue_price=parse_float(ipo_data.get("Price (₹)")),
+            ipo_size_cr=clean_text(ipo_data.get("IPO Size")),
+            pe=parse_float(ipo_data.get("~P/E")),
+            open_date=clean_text(ipo_data.get("~Srt_Open")),
+            close_date=clean_text(ipo_data.get("~Srt_Close")),
+            listing_date=clean_text(ipo_data.get("~Str_Listing")),
+            updated_at=clean_text(ipo_data.get("Updated-On")),
+        )
+
+
+# --- Backwards-compatible module helpers -----------------------------------
+
+
 def fetch_ipo_data(session: requests.Session | None = None) -> list[dict]:
     """Fetch the report payload from InvestorGain."""
 
-    session = session or create_session()
-    response = session.get(URL, timeout=config.REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    data = response.json()
-    return data["reportTableData"]
+    scraper = InvestorGainScraper(session=session)
+    return scraper.rows(scraper.fetch())
 
 
 def convert_to_ipo(ipo_data: dict) -> IPO:
     """Map one InvestorGain report row onto the common IPO model."""
 
-    name = clean_text(ipo_data.get("~ipo_name"))
-    if not name:
-        raise ValueError("InvestorGain row has no IPO name")
-
-    return IPO(
-        name=name,
-        normalized_name=normalize_name(name),
-        ipo_id=parse_int(ipo_data.get("~id")),
-        category=clean_text(ipo_data.get("~IPO_Category")),
-        gmp=parse_float(ipo_data.get("~max_gmp1")),
-        gmp_percent=parse_float(ipo_data.get("~gmp_percent_calc")),
-        issue_price=parse_float(ipo_data.get("Price (₹)")),
-        ipo_size_cr=clean_text(ipo_data.get("IPO Size")),
-        pe=parse_float(ipo_data.get("~P/E")),
-        open_date=clean_text(ipo_data.get("~Srt_Open")),
-        close_date=clean_text(ipo_data.get("~Srt_Close")),
-        listing_date=clean_text(ipo_data.get("~Str_Listing")),
-        updated_at=clean_text(ipo_data.get("Updated-On")),
-    )
+    return InvestorGainScraper().convert_row(ipo_data)
 
 
 def main() -> None:
     config.setup_logging()
-    ipo_data = fetch_ipo_data()
+    scraper = InvestorGainScraper()
+    ipo_data = scraper.rows(scraper.fetch())
 
     logger.info("Found %d IPOs\n", len(ipo_data))
 
@@ -71,7 +88,7 @@ def main() -> None:
     for data in ipo_data:
         # One malformed row must not abort the whole scrape.
         try:
-            ipo = convert_to_ipo(data)
+            ipo = scraper.convert_row(data)
 
             # Only save IPOs that are currently open. InvestorGain doesn't
             # provide a status field, so derive one from open/close dates.
@@ -81,7 +98,10 @@ def main() -> None:
             if status is not None and not is_open_status(status):
                 continue
 
-            db_id = save_ipo_with_gmp(ipo, source=SOURCE)
+            if status is not None:
+                ipo.status = status
+
+            db_id = scraper.save(ipo)
         except Exception as error:  # noqa: BLE001 - report and continue
             failed += 1
             logger.error("Failed to save row: %s", error)

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src import config
+from src.database.migrations import apply_migrations
 
 
 def _resolve_path(db_path: str | Path | None = None) -> Path:
@@ -64,151 +65,14 @@ def connect(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def initialize_database(db_path: str | Path | None = None) -> None:
-    """Create tables/indexes if they do not exist (idempotent)."""
+    """Apply any pending schema migrations (idempotent).
+
+    The schema itself lives in :mod:`src.database.migrations`; this function
+    only opens a connection and runs whatever has not run yet.
+    """
 
     with connect(db_path) as connection:
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ipos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                normalized_name TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-
-                category TEXT,
-
-                issue_price REAL,
-                estimated_listing_price REAL,
-
-                ipo_size_cr TEXT,
-                pe REAL,
-
-                open_date TEXT,
-                close_date TEXT,
-                listing_date TEXT,
-
-                status TEXT,
-                gmp_indicator TEXT,
-
-                sector TEXT,
-                exchange TEXT,
-                lot_size TEXT,
-                subscription REAL,
-                issue_price_lower REAL,
-                issue_price_upper REAL,
-                source_url TEXT,
-                rhp_url TEXT
-            )
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gmp_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                ipo_id INTEGER NOT NULL,
-
-                source TEXT NOT NULL,
-
-                gmp REAL,
-                gmp_percent REAL,
-
-                recorded_at TEXT NOT NULL,
-
-                FOREIGN KEY (ipo_id)
-                    REFERENCES ipos(id)
-                    ON DELETE CASCADE
-            )
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS analysis_reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                ipo_id INTEGER NOT NULL,
-
-                score REAL NOT NULL,
-                verdict TEXT NOT NULL,
-                payload TEXT NOT NULL,
-
-                created_at TEXT NOT NULL,
-
-                FOREIGN KEY (ipo_id)
-                    REFERENCES ipos(id)
-                    ON DELETE CASCADE
-            )
-            """
-        )
-
-        # Keep the analysis query fast as history grows.
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_gmp_history_ipo_recorded
-            ON gmp_history (ipo_id, recorded_at DESC)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_analysis_reports_ipo_created
-            ON analysis_reports (ipo_id, created_at DESC)
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scrape_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                source TEXT NOT NULL,
-                status TEXT NOT NULL,
-
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-
-                rows_scraped INTEGER NOT NULL DEFAULT 0,
-                rows_saved INTEGER NOT NULL DEFAULT 0,
-                rows_failed INTEGER NOT NULL DEFAULT 0,
-
-                error_message TEXT
-            )
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_scrape_runs_source_started
-            ON scrape_runs (source, started_at DESC)
-            """
-        )
-
-        # Allow an existing database to gain new columns without being deleted.
-        cursor.execute("PRAGMA table_info(ipos)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
-
-        columns_to_add = {
-            "estimated_listing_price": "REAL",
-            "status": "TEXT",
-            "gmp_indicator": "TEXT",
-            "sector": "TEXT",
-            "exchange": "TEXT",
-            "lot_size": "TEXT",
-            "subscription": "REAL",
-            "issue_price_lower": "REAL",
-            "issue_price_upper": "REAL",
-            "source_url": "TEXT",
-            "rhp_url": "TEXT",
-        }
-
-        for column_name, column_type in columns_to_add.items():
-            if column_name not in existing_columns:
-                cursor.execute(
-                    f"ALTER TABLE ipos ADD COLUMN {column_name} {column_type}"
-                )
+        apply_migrations(connection)
 
 
 _SCHEMA_READY: set[Path] = set()
@@ -359,39 +223,160 @@ def save_gmp(
     source: str,
     *,
     recorded_at: str | None = None,
+    scrape_run_id: int | None = None,
     db_path: str | Path | None = None,
 ) -> int:
-    """Append one GMP observation and return its row id."""
+    """Record one GMP observation for an IPO/source/UTC-day.
+
+    Re-running a scrape on the same day updates that day's row instead of
+    appending a duplicate. The unique index on
+    ``(ipo_id, source, snapshot_date)`` makes this an atomic upsert.
+    """
 
     ensure_schema(db_path)
     timestamp = recorded_at or datetime.now(UTC).isoformat()
+    snapshot_date = timestamp[:10]
 
     with connect(db_path) as connection:
-        cursor = connection.cursor()
-        cursor.execute(
+        connection.execute(
             """
             INSERT INTO gmp_history (
                 ipo_id,
                 source,
                 gmp,
                 gmp_percent,
-                recorded_at
+                recorded_at,
+                snapshot_date,
+                scrape_run_id
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (ipo_id, source, snapshot_date)
+            DO UPDATE SET
+                gmp = excluded.gmp,
+                gmp_percent = excluded.gmp_percent,
+                recorded_at = excluded.recorded_at,
+                scrape_run_id = COALESCE(
+                    excluded.scrape_run_id,
+                    gmp_history.scrape_run_id
+                )
             """,
-            (ipo_id, source, gmp, gmp_percent, timestamp),
+            (
+                ipo_id,
+                source,
+                gmp,
+                gmp_percent,
+                timestamp,
+                snapshot_date,
+                scrape_run_id,
+            ),
         )
 
+        row = connection.execute(
+            """
+            SELECT id
+            FROM gmp_history
+            WHERE ipo_id = ? AND source = ? AND snapshot_date = ?
+            """,
+            (ipo_id, source, snapshot_date),
+        ).fetchone()
+
+        return int(row["id"])
+
+
+def record_ipo_source(
+    ipo_id: int,
+    source: str,
+    *,
+    source_ipo_id: int | str | None = None,
+    source_url: str | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """Upsert the provenance link between a canonical IPO and a source row."""
+
+    ensure_schema(db_path)
+    now = datetime.now(UTC).isoformat()
+    source_id = str(source_ipo_id) if source_ipo_id is not None else None
+
+    with connect(db_path) as connection:
+        if source_id is not None:
+            row = connection.execute(
+                """
+                SELECT id FROM ipo_sources
+                WHERE source = ? AND source_ipo_id = ?
+                """,
+                (source, source_id),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT id FROM ipo_sources
+                WHERE ipo_id = ? AND source = ? AND source_ipo_id IS NULL
+                """,
+                (ipo_id, source),
+            ).fetchone()
+
+        if row:
+            connection.execute(
+                """
+                UPDATE ipo_sources
+                SET ipo_id = ?,
+                    source_url = COALESCE(?, source_url),
+                    last_seen_at = ?
+                WHERE id = ?
+                """,
+                (ipo_id, source_url, now, row["id"]),
+            )
+            return int(row["id"])
+
+        cursor = connection.execute(
+            """
+            INSERT INTO ipo_sources (
+                ipo_id,
+                source,
+                source_ipo_id,
+                source_url,
+                first_seen_at,
+                last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ipo_id, source, source_id, source_url, now, now),
+        )
         return int(cursor.lastrowid)
+
+
+def get_ipo_sources(
+    ipo_id: int,
+    *,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return every source record linked to one canonical IPO."""
+
+    ensure_schema(db_path)
+
+    with connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ipo_id, source, source_ipo_id, source_url,
+                   first_seen_at, last_seen_at
+            FROM ipo_sources
+            WHERE ipo_id = ?
+            ORDER BY source ASC
+            """,
+            (ipo_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def save_ipo_with_gmp(
     ipo: Any,
     source: str,
     *,
+    scrape_run_id: int | None = None,
     db_path: str | Path | None = None,
 ) -> int:
-    """Save/update an IPO and record its latest GMP observation."""
+    """Save/update an IPO, its GMP observation and its source provenance."""
 
     ipo_db_id = get_or_create_ipo(ipo, db_path=db_path)
 
@@ -400,6 +385,15 @@ def save_ipo_with_gmp(
         gmp=ipo.gmp,
         gmp_percent=ipo.gmp_percent,
         source=source,
+        scrape_run_id=scrape_run_id,
+        db_path=db_path,
+    )
+
+    record_ipo_source(
+        ipo_db_id,
+        source=source,
+        source_ipo_id=ipo.ipo_id,
+        source_url=ipo.source_url,
         db_path=db_path,
     )
 
@@ -430,7 +424,8 @@ def get_gmp_history(
     """Return GMP observations for one IPO, newest first."""
 
     query = """
-        SELECT id, ipo_id, source, gmp, gmp_percent, recorded_at
+        SELECT id, ipo_id, source, gmp, gmp_percent, recorded_at,
+               snapshot_date, scrape_run_id
         FROM gmp_history
         WHERE ipo_id = ?
         ORDER BY recorded_at DESC, id DESC

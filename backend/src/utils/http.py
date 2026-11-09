@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass, field
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from src import config
+
+
+@dataclass
+class RateLimiter:
+    """Space requests apart by at least ``min_interval`` seconds.
+
+    The first call never sleeps. Later calls sleep only for the time still
+    missing, so a slow response already counts towards the interval. This is
+    the "polite scraper" behaviour: no hammering a public endpoint.
+    """
+
+    min_interval: float = 1.0
+    _last_request: float | None = field(default=None, init=False)
+
+    def wait(self) -> float:
+        """Sleep if needed and return the number of seconds slept."""
+
+        if self.min_interval <= 0:
+            return 0.0
+
+        now = time.monotonic()
+        if self._last_request is None:
+            self._last_request = now
+            return 0.0
+
+        delay = self.min_interval - (now - self._last_request)
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            delay = 0.0
+
+        self._last_request = time.monotonic()
+        return delay
 
 
 def create_session() -> requests.Session:

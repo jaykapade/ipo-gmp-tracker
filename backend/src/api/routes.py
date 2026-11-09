@@ -18,6 +18,7 @@ from src.api.schemas import (
     HealthResponse,
     IPODetail,
     IPOPage,
+    IPOSourceOut,
     IPOSummary,
     ReportInfo,
 )
@@ -206,6 +207,13 @@ def get_ipo(request: Request, ipo_id: int) -> IPODetail:
                 recorded_at=item["recorded_at"],
             )
             for item in history
+        ],
+        sources=[
+            IPOSourceOut(**source)
+            for source in db.get_ipo_sources(
+                ipo_id,
+                db_path=_db_path(request),
+            )
         ],
         latest_analysis=db.get_latest_analysis(
             ipo_id,

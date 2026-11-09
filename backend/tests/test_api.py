@@ -127,6 +127,8 @@ def test_get_ipo_includes_history(client):
     assert payload["gmp_percent"] == 30
     assert len(payload["gmp_history"]) == 1
     assert payload["gmp_history"][0]["source"] == "test"
+    assert payload["sources"][0]["source"] == "test"
+    assert payload["sources"][0]["source_url"] is None
 
 
 def test_get_missing_ipo_returns_404(client):

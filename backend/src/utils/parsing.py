@@ -112,7 +112,7 @@ def parse_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
 
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
 
     text = clean_text(value)
@@ -243,7 +243,7 @@ def parse_date(value: Any, *, today: date | None = None) -> date | None:
 
     for date_format in _DATE_FORMATS:
         try:
-            parsed = datetime.strptime(text, date_format)
+            parsed = datetime.strptime(text, date_format)  # noqa: DTZ007
         except ValueError:
             continue
 

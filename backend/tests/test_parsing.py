@@ -142,7 +142,7 @@ def test_parse_date_accepts_date_objects():
     day = date(2026, 9, 24)
 
     assert parse_date(day) == day
-    assert parse_date(datetime(2026, 9, 24, 23, 0)) == day
+    assert parse_date(datetime(2026, 9, 24, 23, 0)) == day  # noqa: DTZ001
 
 
 def test_parse_date_converts_timezone_to_ist():

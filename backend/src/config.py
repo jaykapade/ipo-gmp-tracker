@@ -90,7 +90,7 @@ def _env_path(name: str, default: str) -> Path:
 def current_fiscal_year(today: date | None = None) -> str:
     """Return the Indian fiscal year label (April–March), e.g. ``2026-27``."""
 
-    reference = today or date.today()
+    reference = today or date.today()  # noqa: DTZ011 - calendar date, not a timestamp
     start_year = reference.year if reference.month >= 4 else reference.year - 1
     return f"{start_year}-{str(start_year + 1)[-2:]}"
 
@@ -107,6 +107,7 @@ INCLUDE_UPCOMING = _env_bool("INCLUDE_UPCOMING", False)
 # --- HTTP -------------------------------------------------------------------
 
 REQUEST_TIMEOUT = _env_float("REQUEST_TIMEOUT", 30.0)
+REQUEST_DELAY_SECONDS = _env_float("REQUEST_DELAY_SECONDS", 1.0)
 USER_AGENT = _env(
     "USER_AGENT",
     "IPO-Checker/0.1 (personal research; polite scraper)",
@@ -115,7 +116,10 @@ USER_AGENT = _env(
 # --- Sources ----------------------------------------------------------------
 
 INVESTORGAIN_REPORT_ID = _env_int("INVESTORGAIN_REPORT_ID", 331)
-INVESTORGAIN_YEAR = _env_int("INVESTORGAIN_YEAR", date.today().year)
+INVESTORGAIN_YEAR = _env_int(
+    "INVESTORGAIN_YEAR",
+    date.today().year,  # noqa: DTZ011 - calendar year, not a timestamp
+)
 INVESTORGAIN_FISCAL_YEAR = _env(
     "INVESTORGAIN_FISCAL_YEAR",
     current_fiscal_year(),

@@ -5,7 +5,9 @@ import json
 from src.database import db
 from src.main import main
 from src.models.ipo import IPO
-from src.pipeline import analyses_as_json, analyze_pipeline
+from src.pipeline import SCRAPERS, analyses_as_json, analyze_pipeline, scrape_sources
+from src.scrapers.base import BaseScraper
+from src.scrapers.errors import FetchError, ParseError
 from src.utils.normalization import normalize_name
 
 
@@ -100,6 +102,112 @@ def test_cli_analyze_json(tmp_path, capsys):
     assert exit_code == 0
     payload = json.loads(output)
     assert payload[0]["name"] == "Above Ltd"
+
+
+class FakeScraper(BaseScraper):
+    source_name = "Fake"
+
+    def fetch(self):
+        return {"data": [{"id": 1, "name": "Good Ltd"}, {"id": 2}]}
+
+    def rows(self, payload):
+        return payload["data"]
+
+    def convert_row(self, row):
+        name = row.get("name")
+        if not name:
+            raise ParseError("row has no name")
+        return IPO(
+            name=name,
+            normalized_name=normalize_name(name),
+            ipo_id=row["id"],
+            status="Open",
+            issue_price=100.0,
+            gmp=30.0,
+            gmp_percent=30.0,
+        )
+
+
+class FailingScraper(BaseScraper):
+    source_name = "Failing"
+
+    def fetch(self):
+        raise FetchError("source is down")
+
+    def rows(self, payload):
+        return []
+
+    def convert_row(self, row):
+        raise AssertionError("should not be called")
+
+
+def test_scrape_sources_isolates_bad_rows_and_records_provenance(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "test.db"
+    monkeypatch.setitem(SCRAPERS, "fake", FakeScraper(request_delay=0))
+
+    results = scrape_sources(["fake"], db_path=db_path)
+
+    assert results[0].saved == 1
+    assert results[0].failed == 1
+
+    ipo = db.list_ipos(db_path=db_path)[0]
+    sources = db.get_ipo_sources(ipo["id"], db_path=db_path)
+    assert sources[0]["source"] == "Fake"
+    assert sources[0]["source_ipo_id"] == "1"
+
+    run = db.get_scrape_runs(db_path=db_path)[0]
+    assert run["status"] == "completed"
+    assert run["rows_scraped"] == 2
+    assert run["rows_saved"] == 1
+    assert run["rows_failed"] == 1
+
+
+class DateStatusScraper(BaseScraper):
+    source_name = "Dates"
+
+    def fetch(self):
+        return {}
+
+    def rows(self, payload):
+        return [{}]
+
+    def convert_row(self, row):
+        return IPO(
+            name="Derived Status Ltd",
+            normalized_name="derived_status",
+            open_date="2000-01-01",
+            close_date="2099-01-01",
+            issue_price=100.0,
+            gmp=30.0,
+            gmp_percent=30.0,
+        )
+
+
+def test_scrape_sources_persists_a_derived_status(tmp_path, monkeypatch):
+    db_path = tmp_path / "test.db"
+    monkeypatch.setitem(SCRAPERS, "dates", DateStatusScraper(request_delay=0))
+
+    results = scrape_sources(["dates"], db_path=db_path)
+
+    assert results[0].saved == 1
+    saved = db.list_ipos(db_path=db_path)[0]
+    assert saved["status"] == "open"
+
+
+def test_scrape_sources_marks_fetch_failure(tmp_path, monkeypatch):
+    db_path = tmp_path / "test.db"
+    monkeypatch.setitem(SCRAPERS, "failing", FailingScraper(request_delay=0))
+
+    results = scrape_sources(["failing"], db_path=db_path)
+
+    assert results[0].saved == 0
+    assert results[0].errors == ["fetch failed: source is down"]
+
+    run = db.get_scrape_runs(db_path=db_path)[0]
+    assert run["status"] == "failed"
+    assert "source is down" in run["error_message"]
 
 
 def test_cli_report_writes_pdf(tmp_path, capsys):

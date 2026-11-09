@@ -58,9 +58,20 @@ class GMPPoint(BaseModel):
     recorded_at: str
 
 
+class IPOSourceOut(BaseModel):
+    """Provenance link between a canonical IPO and one source record."""
+
+    source: str
+    source_ipo_id: str | None = None
+    source_url: str | None = None
+    first_seen_at: str
+    last_seen_at: str
+
+
 class IPODetail(IPOSummary):
     rhp_url: str | None = None
     gmp_history: list[GMPPoint] = Field(default_factory=list)
+    sources: list[IPOSourceOut] = Field(default_factory=list)
     latest_analysis: dict[str, Any] | None = None
 
 

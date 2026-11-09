@@ -10,16 +10,21 @@ from src import config
 from src.analysis import analyze_candidates, select_candidates
 from src.database import db
 from src.models.analysis import IPOAnalysis
-from src.scrapers import investorgain, ipowatch
+from src.scrapers.base import BaseScraper
+from src.scrapers.errors import ScraperError
+from src.scrapers.investorgain import InvestorGainScraper
+from src.scrapers.ipowatch import IpoWatchScraper
 from src.utils.parsing import (
     IST,
     derive_status_from_dates,
     is_open_status,
 )
 
-SCRAPERS = {
-    "ipowatch": ipowatch,
-    "investorgain": investorgain,
+# One instance per source. They create their HTTP session lazily, so importing
+# this module never opens a connection.
+SCRAPERS: dict[str, BaseScraper] = {
+    "ipowatch": IpoWatchScraper(),
+    "investorgain": InvestorGainScraper(),
 }
 
 
@@ -31,6 +36,23 @@ class ScrapeResult:
     saved: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+def _fail_scrape_run(
+    run_id: int,
+    result: ScrapeResult,
+    error: Exception,
+    db_path: str | Path | None,
+) -> None:
+    """Record a fetch/parse failure and keep the remaining sources running."""
+
+    result.errors.append(f"fetch failed: {error}")
+    db.update_scrape_run(
+        run_id,
+        status="failed",
+        error_message=str(error),
+        db_path=db_path,
+    )
 
 
 @dataclass
@@ -53,24 +75,23 @@ def scrape_sources(
     results: list[ScrapeResult] = []
 
     for name in sources:
-        module = SCRAPERS.get(name)
-        if module is None:
+        scraper = SCRAPERS.get(name)
+        if scraper is None:
             raise ValueError(f"Unknown source: {name}")
 
-        result = ScrapeResult(source=module.SOURCE)
+        result = ScrapeResult(source=scraper.source_name)
 
-        run_id = db.create_scrape_run(module.SOURCE, db_path=db_path)
+        run_id = db.create_scrape_run(scraper.source_name, db_path=db_path)
 
         try:
-            rows = module.fetch_ipo_data()
+            payload = scraper.fetch()
+            rows = scraper.rows(payload)
+        except ScraperError as error:
+            _fail_scrape_run(run_id, result, error, db_path)
+            results.append(result)
+            continue
         except Exception as error:  # noqa: BLE001 - report and continue
-            result.errors.append(f"fetch failed: {error}")
-            db.update_scrape_run(
-                run_id,
-                status="failed",
-                error_message=str(error),
-                db_path=db_path,
-            )
+            _fail_scrape_run(run_id, result, error, db_path)
             results.append(result)
             continue
 
@@ -78,7 +99,7 @@ def scrape_sources(
 
         for row in rows:
             try:
-                ipo = module.convert_to_ipo(row)
+                ipo = scraper.convert_row(row)
 
                 # Only save IPOs that are currently open. Sources that don't
                 # provide a status (e.g. InvestorGain) get one derived from
@@ -91,10 +112,15 @@ def scrape_sources(
                 if status is not None and not is_open_status(status):
                     continue
 
-                module.save_ipo_with_gmp(
+                # Persist the derived status too, otherwise InvestorGain rows
+                # keep status = NULL and cannot be filtered by status later.
+                if status is not None:
+                    ipo.status = status
+
+                scraper.save(
                     ipo,
-                    source=module.SOURCE,
                     db_path=db_path,
+                    scrape_run_id=run_id,
                 )
                 result.saved += 1
             except Exception as error:  # noqa: BLE001 - report and continue
@@ -103,7 +129,7 @@ def scrape_sources(
 
         db.update_scrape_run(
             run_id,
-            status="completed" if not result.errors else "completed",
+            status="completed",
             rows_scraped=rows_scraped,
             rows_saved=result.saved,
             rows_failed=result.failed,

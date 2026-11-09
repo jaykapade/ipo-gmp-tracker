@@ -135,3 +135,100 @@ def test_analysis_report_round_trip(tmp_path):
     assert loaded["ipo_id"] == ipo_id
     assert loaded["score"] == analysis.score
     assert loaded["verdict"] == analysis.verdict
+
+
+def test_save_gmp_upserts_within_the_same_day(tmp_path):
+    db_path = tmp_path / "test.db"
+    ipo_id = db.get_or_create_ipo(make_ipo("Example Ltd"), db_path=db_path)
+
+    first = db.save_gmp(
+        ipo_id,
+        gmp=10.0,
+        gmp_percent=10.0,
+        source="test",
+        recorded_at="2026-09-01T01:00:00+00:00",
+        db_path=db_path,
+    )
+    second = db.save_gmp(
+        ipo_id,
+        gmp=20.0,
+        gmp_percent=20.0,
+        source="test",
+        recorded_at="2026-09-01T09:00:00+00:00",
+        db_path=db_path,
+    )
+
+    history = db.get_gmp_history(ipo_id, limit=None, db_path=db_path)
+
+    assert first == second
+    assert len(history) == 1
+    assert history[0]["gmp"] == 20.0
+    assert history[0]["snapshot_date"] == "2026-09-01"
+
+
+def test_save_gmp_keeps_separate_days_and_run_id(tmp_path):
+    db_path = tmp_path / "test.db"
+    ipo_id = db.get_or_create_ipo(make_ipo("Example Ltd"), db_path=db_path)
+    run_id = db.create_scrape_run("test", db_path=db_path)
+
+    db.save_gmp(
+        ipo_id,
+        10.0,
+        10.0,
+        "test",
+        recorded_at="2026-09-01T01:00:00+00:00",
+        scrape_run_id=run_id,
+        db_path=db_path,
+    )
+    db.save_gmp(
+        ipo_id,
+        20.0,
+        20.0,
+        "test",
+        recorded_at="2026-09-02T01:00:00+00:00",
+        db_path=db_path,
+    )
+
+    history = db.get_gmp_history(ipo_id, limit=None, db_path=db_path)
+
+    assert [row["gmp"] for row in history] == [20.0, 10.0]
+    assert history[1]["scrape_run_id"] == run_id
+
+
+def test_provenance_is_upserted_not_duplicated(tmp_path):
+    db_path = tmp_path / "test.db"
+    ipo = make_ipo("Example Ltd", ipo_id=42, source_url="https://example.test/a")
+
+    ipo_id = db.save_ipo_with_gmp(ipo, "source-a", db_path=db_path)
+    db.save_ipo_with_gmp(
+        make_ipo("Example Ltd", ipo_id=42, source_url="https://example.test/b"),
+        "source-a",
+        db_path=db_path,
+    )
+
+    sources = db.get_ipo_sources(ipo_id, db_path=db_path)
+
+    assert len(sources) == 1
+    assert sources[0]["source"] == "source-a"
+    assert sources[0]["source_ipo_id"] == "42"
+    assert sources[0]["source_url"] == "https://example.test/b"
+    assert sources[0]["first_seen_at"] <= sources[0]["last_seen_at"]
+
+
+def test_two_sources_link_to_one_canonical_ipo(tmp_path):
+    db_path = tmp_path / "test.db"
+
+    ipo_id = db.save_ipo_with_gmp(
+        make_ipo("Example Ltd", ipo_id=1),
+        "source-a",
+        db_path=db_path,
+    )
+    db.save_ipo_with_gmp(
+        make_ipo("Example Ltd", ipo_id=2),
+        "source-b",
+        db_path=db_path,
+    )
+
+    sources = db.get_ipo_sources(ipo_id, db_path=db_path)
+
+    assert {row["source"] for row in sources} == {"source-a", "source-b"}

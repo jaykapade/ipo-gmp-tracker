@@ -7,10 +7,13 @@ an analysed PDF report that is emailed automatically, and eventually exposing a
 current IPOs.
 
 > **Status: working prototype.**
-> Scraping, SQLite persistence, the 20% GMP filter, deterministic analysis, PDF
-> reporting, optional SMTP email, the CLI, and the test suite work. The local-AI
-> layer and web frontend do not exist yet. See [Roadmap / TODO](#roadmap--todo)
-> for the agreed next steps.
+> Scraping, SQLite persistence with numbered migrations and source provenance,
+> the 20% GMP filter, deterministic analysis, PDF reporting, optional SMTP email,
+> the read-only FastAPI service, the CLI, and the test suite work. The local-AI
+> layer and web frontend do not exist yet. The research specification for the
+> overview/in-depth analysis, PDF deep links and local-model layer lives in
+> [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
+> [Roadmap / TODO](#roadmap--todo) for the agreed next steps.
 >
 > **Disclaimer:** This project is for personal research and automation. It is **not**
 > investment advice. Grey-market premium is unofficial, speculative, and can vanish
@@ -38,8 +41,10 @@ current IPOs.
   - [5. Generate a PDF and email it](#5-generate-a-pdf-and-email-it)
   - [6. Add local-AI enrichment](#6-add-local-ai-enrichment)
   - [7. Build the Next.js frontend and IPO chat](#7-build-the-nextjs-frontend-and-ipo-chat)
+  - [8. Research-grade overview, financial analysis and PDF deep links](#8-research-grade-overview-financial-analysis-and-pdf-deep-links)
   - [Cross-cutting engineering tasks](#cross-cutting-engineering-tasks)
 - [IPO analysis checklist](#ipo-analysis-checklist)
+- [Research framework](docs/ipo-research-framework.md)
 - [Definition of done](#definition-of-done)
 
 ---
@@ -52,15 +57,15 @@ current IPOs.
 | **IPO Watch scraper** | Consumes the JSON API behind the GMP page (`/server/api/ipo/GetIpoListingByStatus`) and maps the price band, sector, lot size, subscription, and dates into the `IPO` model. No HTML parsing. Only rows whose status is `open` (or derived as `open` from dates) are saved. |
 | **Status filtering** | `src/utils/parsing.py` provides `is_open_status()` (exact match on `"open"`) and `derive_status_from_dates()` (infers `open`/`upcoming`/`closed` from `open_date`/`close_date`). The pipeline skips any IPO that is not currently open, so stale/closed/listed IPOs never enter `ipos` or `gmp_history`. |
 | **Normalisation** | `normalize_name()` lowercases, strips `Ltd`/`Limited`, and converts to a `snake_case`-style key used as the cross-source identity. |
-| **SQLite persistence** | Creates `ipos` and `gmp_history`; upserts IPOs on `normalized_name` and appends a GMP history row per scrape. |
-| **Analysis** | `backend/analysis/` selects active IPOs whose **latest** GMP is at or above the configured threshold (default **20%**), derives `gmp_percent` when a source omits it, computes transparent weighted factors (GMP, valuation, fundamentals, subscription, risk), and produces a `Strong / Watch / Avoid` verdict with a checklist, strengths, risks and explicit data gaps. Results are persisted to `analysis_reports`. |
-| **Reporting** | `backend/reporting/pdf.py` renders a ReportLab PDF with a summary table, per-IPO score breakdown, checklist, strengths/risks and data gaps. Reports are written to `reports/`. |
-| **Email** | `backend/reporting/emailer.py` sends the PDF over SMTP (TLS by default) to comma-separated `EMAIL_TO` recipients. `--dry-run` validates the message without connecting. |
+| **SQLite persistence** | Creates and upgrades `ipos`, `gmp_history`, `analysis_reports`, `scrape_runs`, `ipo_sources` and `schema_migrations` through numbered migrations. Upserts IPOs on `normalized_name`, keeps one GMP row per source per UTC day, and records which source each IPO came from. |
+| **Analysis** | `src/analysis/` selects active IPOs whose **latest** GMP is at or above the configured threshold (default **20%**), derives `gmp_percent` when a source omits it, computes transparent weighted factors (GMP, valuation, fundamentals, subscription, risk), and produces a `Strong / Watch / Avoid` verdict with a checklist, strengths, risks and explicit data gaps. Results are persisted to `analysis_reports`. |
+| **Reporting** | `src/reporting/pdf.py` renders a ReportLab PDF with a summary table, per-IPO score breakdown, checklist, strengths/risks and data gaps. Reports are written to `reports/`. |
+| **Email** | `src/reporting/emailer.py` sends the PDF over SMTP (TLS by default) to comma-separated `EMAIL_TO` recipients. `--dry-run` validates the message without connecting. |
 | **CLI** | `python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
 | **Tests** | `pytest` suite covering name normalisation, number/date parsing, active-status logic, the IPO Watch mapping, DB upserts/query helpers, analysis scoring/checklists, PDF generation, email dry-runs and the CLI. |
-| **Local AI** | Not implemented. Planned as an **optional** Ollama-backed layer for RHP extraction, analysis narratives, entity matching, and chat. Must never replace deterministic filters or calculations. |
-| **Web frontend** | Not implemented. Planned Next.js dashboard (shortlist, GMP charts, analysis, reports) plus a streaming chat UI over current IPOs. |
-| **API** | Not implemented. Planned FastAPI service to expose the SQLite data, analysis, reports, and chat streaming to the frontend. |
+| **Local AI** | Not implemented. Planned as an **optional, local-only** layer (Ollama / llama.cpp / LM Studio) for RHP extraction, analysis narratives, entity matching and chat. No cloud calls. Must never replace deterministic filters or calculations. Model names are pending the user's installation. |
+| **Web frontend** | Not implemented. Planned Next.js dashboard with an **Overview** tab and an **In-depth** financial-analysis tab per IPO, GMP charts, reports, and a streaming chat UI. |
+| **API** | Implemented read-only FastAPI service (`python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
 
 ---
 
@@ -70,6 +75,8 @@ current IPOs.
 IPO Checker/
 ├── README.md
 ├── .gitignore
+├── docs/
+│   └── ipo-research-framework.md  # research specification (checklist, schema, scoring)
 ├── backend/
 │   ├── .env.example               # documented settings (copy to .env)
 │   ├── .gitignore                 # repo-level ignores
@@ -99,7 +106,8 @@ IPO Checker/
 │   │   │   └── analyzer.py        # builds the IPOAnalysis object
 │   │   ├── database/
 │   │   │   ├── __init__.py
-│   │   │   └── db.py              # schema, connection, upsert, GMP history + queries
+│   │   │   ├── migrations.py      # numbered, idempotent schema migrations
+│   │   │   └── db.py              # connection, upsert, GMP history, provenance + queries
 │   │   ├── models/
 │   │   │   ├── __init__.py
 │   │   │   ├── ipo.py             # pydantic IPO model
@@ -111,6 +119,8 @@ IPO Checker/
 │   │   │   └── summary.py         # plain-text summary
 │   │   ├── scrapers/
 │   │   │   ├── __init__.py
+│   │   │   ├── base.py            # BaseScraper blueprint + payload helper
+│   │   │   ├── errors.py          # ScraperError / FetchError / ParseError
 │   │   │   ├── investorgain.py    # JSON API scraper
 │   │   │   └── ipowatch.py        # JSON API scraper
 │   │   └── utils/
@@ -120,9 +130,9 @@ IPO Checker/
 │   │       ├── normalization.py   # name normalisation only
 │   │       └── parsing.py         # numbers, dates, date ranges, status logic
 │   └── tests/                     # pytest suite (inside backend/)
-├── frontend/                      # planned: Next.js frontend
+├── frontend/                      # planned: Next.js frontend (currently empty)
 ├── docker-compose.yml             # planned: api + web + ollama
-└── .venv/                         # local virtualenv (gitignored)
+└── backend/.venv/                 # local virtualenv (gitignored)
 ```
 
 Only the files marked "planned" above do not exist yet. Everything else is present
@@ -183,9 +193,12 @@ protections; prefer polite request rates and a documented user agent.
 | `gmp` | REAL | Absolute premium (₹). |
 | `gmp_percent` | REAL | Percentage premium. |
 | `recorded_at` | TEXT NOT NULL | UTC ISO timestamp. |
+| `snapshot_date` | TEXT | UTC day (`YYYY-MM-DD`) used for dedupe. |
+| `scrape_run_id` | INTEGER | The `scrape_runs` row that produced this value. |
 
-`gmp_history` is append-only: one row per IPO per scrape. There is currently no
-uniqueness constraint, so repeated runs create duplicates.
+`gmp_history` keeps one row per `(ipo_id, source, snapshot_date)`, enforced by a
+unique index. Repeated scrapes on the same UTC day update that day's row instead
+of appending duplicates; `scrape_run_id` records which run last touched it.
 
 ### `scrape_runs`
 
@@ -328,6 +341,7 @@ INCLUDE_UPCOMING=false
 
 # HTTP
 REQUEST_TIMEOUT=30
+REQUEST_DELAY_SECONDS=1.0
 USER_AGENT=IPO-Checker/0.1 (personal research; polite scraper)
 
 # Sources
@@ -375,40 +389,34 @@ report → email pipeline works on a machine with no GPU or model runtime.
 
 ## Known issues
 
-These are confirmed while walking the repository and should be fixed as part of the
-roadmap:
+These are the gaps that remain after the backend P1 hardening pass. Resolved items
+(GMP dedupe, HTTP hardening, logging, ruff, provenance) have been removed.
 
 1. **InvestorGain report ID still defaults to `331`.** The URL, year, and fiscal year
    are configurable (`INVESTORGAIN_*`) and the fiscal year is derived, but the report
    ID must be updated per season.
 2. **No dedupe across sources.** Identity relies entirely on `normalize_name`; minor
    spelling differences (`&` vs `and`, abbreviations) create duplicate IPOs.
-3. **Unbounded duplicate GMP history.** Every run appends rows with no unique key or
-   snapshot bucket.
-4. **Connection churn.** `save_ipo_with_gmp()` still opens two SQLite connections
-   (upsert, then GMP insert); no transaction batching.
-5. **`COALESCE` upserts cannot clear values.** Stale fields can never be set back to
+3. **Connection churn.** `save_ipo_with_gmp()` still opens separate connections for
+   the IPO upsert, the GMP upsert and the provenance upsert; no transaction batching.
+4. **`COALESCE` upserts cannot clear values.** Stale fields can never be set back to
    `NULL`, and there are no `created_at`/`updated_at` row timestamps.
-6. **Weak typing.** Dates and `ipo_size_cr` are stored as text; no DB-level validation.
-7. **No rate limiting or typed exceptions.** Requests retry transient failures, but
-   there is no polite delay between calls and errors are plain `Exception`s.
-8. **No logging.** `print()` only; no structured logs or run summaries. ← **Done** —
-   `src/config.py` now has `setup_logging()` with a `LOG_LEVEL` env var; the CLI and
-   scrapers use `logging` instead of `print()`.
-9. **No linter, formatter, or mypy.** ← **Done** — `ruff` is configured in
-   `pyproject.toml` and added to `requirements-dev.txt`.
-10. **Email has no delivery log, retry policy, or idempotency.** Each `--email`
-    run sends immediately; transient SMTP failures abort the send, and nothing
-    records previous sends. The body is plain text, not HTML.
-11. **The PDF has no GMP trend chart.** The history is stored and used for the
-    textual trend, but the report only contains tables.
-12. **No provenance.** `ipos.ipo_id` mixes source-specific IDs; there is no
-    `ipo_sources` table linking canonical IPOs to each source's ID/URL.
-13. **No service layer or frontend.** There is no API, no web UI, no authentication,
-    and no way to query the data except the CLI or raw SQL.
-14. **No document store.** RHP/DRHP PDFs are not fetched, parsed, chunked, or
+5. **Weak typing.** Dates and `ipo_size_cr` are stored as text; no DB-level validation.
+6. **No research-grade financial data model.** Financial statements, ratios, peers,
+   subscription snapshots and per-fact source citations are not stored yet; the flat
+   `ipos` row is the only source. See the
+   [research framework](docs/ipo-research-framework.md).
+7. **Email has no delivery log, retry policy, or idempotency.** Each `--email`
+   run sends immediately; transient SMTP failures abort the send, and nothing
+   records previous sends. The body is plain text, not HTML.
+8. **The PDF has no GMP trend chart or app deep links.** The history is stored and
+   used for the textual trend, but the report only contains tables and cannot route
+   the reader into the app for in-depth analysis.
+9. **Frontend and auth gap.** The API exists, but there is no web UI and no
+   authentication beyond the optional `X-API-Token` on mutating endpoints.
+10. **No document store.** RHP/DRHP PDFs are not fetched, parsed, chunked, or
     indexed, so there is nothing for an AI layer to cite.
-15. **No AI guardrails or evaluation.** No prompt versioning, schema validation,
+11. **No AI guardrails or evaluation.** No prompt versioning, schema validation,
     caching, citation tracking, or golden-set tests exist yet.
 
 ---
@@ -489,12 +497,21 @@ Scheduled job (backend/src/main.py): scrape → analyse → filter (GMP ≥ 20%)
 | **Chat layer** | `backend/chat` + AI SDK `useChat` | Intent → whitelisted tool calls → grounded answer with citations. |
 | **Pipeline** | Existing Python modules + `backend/src/main.py` | Scrape, normalise, persist, filter, analyse, render, email. |
 
-### Planned API surface
+### API surface
+
+Implemented today: `GET /api/ipos`, `GET /api/ipos/{id}` (including GMP history,
+provenance and the latest analysis), `GET /api/candidates`, `GET`/`POST /api/reports`,
+`GET /api/reports/{filename}`, `GET /api/quality/duplicates` and `GET /api/health`.
+`POST /api/analyze` and `POST /api/reports` are token-protected. Search/sort, the
+overview/in-depth financial endpoints, chat streaming, admin scrape and Ollama health
+are still planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/ipos?status=&min_gmp_percent=20&q=&sort=` | Paginated, filterable IPO shortlist. |
 | `GET` | `/api/ipos/{id}` | Full IPO record + latest GMP + source links. |
+| `GET` | `/api/ipos/{id}/overview` | Compact overview: business snapshot, issue structure, valuation, GMP, key financial trend, strengths/risks, completeness. |
+| `GET` | `/api/ipos/{id}/financials` | In-depth annual/quarterly statements, ratios, peer comparison and per-fact citations. |
 | `GET` | `/api/ipos/{id}/gmp-history?days=30` | Time series for charts. |
 | `GET` | `/api/ipos/{id}/analysis` | Metrics, score, strengths, risks, citations. |
 | `GET` | `/api/reports` | Generated report history + download URLs. |
@@ -570,11 +587,12 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
 - [ ] **P1 — HTTP hardening (both sources).**
   - [x] Shared `requests.Session` with retry/backoff (`urllib3.Retry`).
   - [x] Explicit `User-Agent`, `Accept`, timeouts.
-  - [ ] Rate limiting / polite delay between requests.
-  - [ ] Clear, typed exceptions (`ScraperError`, `ParseError`).
-- [ ] **P1 — Source abstraction.** Define a `BaseScraper` interface
-      (`source_name`, `fetch()`, `parse() -> list[IPO]`) and implement
-      `InvestorGainScraper`, `IpoWatchScraper`.
+  - [x] Rate limiting / polite delay between requests
+        (`REQUEST_DELAY_SECONDS` + `RateLimiter`).
+  - [x] Clear, typed exceptions (`ScraperError`, `FetchError`, `ParseError`).
+- [x] **P1 — Source abstraction.** `BaseScraper` in `src/scrapers/base.py`
+      (`source_name`, `fetch()`, `rows()`, `convert_row()`, `parse()`, `scrape()`)
+      with `InvestorGainScraper` and `IpoWatchScraper` implementations.
 - [ ] **P2 — Add more sources** (NSE/BSE, Chittorgarh, Moneycontrol, IPO Central)
       behind the same interface, with per-source enable/disable flags.
 - [x] **P2 — Scraper tests** for the IPO Watch payload mapping, offline and
@@ -587,8 +605,9 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
 
 - [x] **P0 — Fix the broken analysis imports** by adding the missing modules
       (`backend/src/config.py`, `backend/src/utils/parsing.py`) or removing the dead references.
-- [ ] **P1 — Add a migration mechanism.** `schema_migrations` table + numbered SQL
-      migrations; stop ad-hoc `ALTER TABLE` blocks in `initialize_database()`.
+- [x] **P1 — Add a migration mechanism.** `schema_migrations` table + numbered
+      migrations in `src/database/migrations.py`; `initialize_database()` only
+      applies pending versions.
 - [ ] **P1 — Normalise the schema.**
   - [x] Store dates as ISO-8601 strings consistently.
   - [ ] Make `ipo_size_cr` numeric (`REAL`).
@@ -597,15 +616,16 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
   - [x] Add `sector`, `exchange`.
   - [x] Add `source_url`, `rhp_url`.
   - [ ] Add `created_at`, `updated_at` (UTC) to every table.
-- [ ] **P1 — Provenance table `ipo_sources`.**
+- [x] **P1 — Provenance table `ipo_sources`.**
       `(ipo_id, source, source_ipo_id, source_url, first_seen_at, last_seen_at)`
-      with `UNIQUE(source, source_ipo_id)`. Stop overloading `ipos.ipo_id`.
+      with `UNIQUE(source, source_ipo_id)`. Existing history is backfilled by
+      migration 6.
 - [ ] **P1 — Cross-source matching.**
   - [ ] Match on `ipo_sources` first, then normalized name.
   - [ ] Add an alias table for known variants (`&`/`and`, `Ltd`, abbreviations).
   - [ ] Consider fuzzy matching with a similarity threshold + manual review queue.
-- [ ] **P2 — GMP snapshots without duplicates.**
-  - [ ] Bucket by scrape run (`scrape_runs` table) and/or
+- [x] **P2 — GMP snapshots without duplicates.**
+  - [x] Bucket by scrape run (`scrape_run_id`) and
         `UNIQUE(ipo_id, source, snapshot_date)`.
   - [x] Index `gmp_history(ipo_id, recorded_at)`.
 - [ ] **P2 — Performance & safety.**
@@ -720,6 +740,60 @@ pipeline fully functional.
 - [ ] **P2 — Quality.** API tests, Playwright end-to-end tests, loading/error/empty
       states, keyboard accessibility, and responsive dark mode.
 
+### 8. Research-grade overview, financial analysis and PDF deep links
+
+These are the next product goals. The full specification lives in
+[`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). **All AI in
+this section must run on local models only**; the user will install the models and
+confirm the exact names before the AI parts are implemented.
+
+- [ ] **P1 — Overview + in-depth split in the app.**
+  - [ ] **Overview tab**: company/business snapshot, issue structure, price band,
+        lot size, fresh vs OFS, valuation, GMP, subscription, top strengths/risks,
+        data completeness and confidence.
+  - [ ] **In-depth tab**: annual/quarterly P&L, balance sheet, cash flow, ratios,
+        growth, peers, promoter/management, litigation, industry, SME module,
+        post-listing performance, and source citations.
+  - [ ] Add `GET /api/ipos/{id}/overview` and `GET /api/ipos/{id}/financials`
+        (see [API surface](#api-surface)).
+  - [ ] Persist the underlying data in the research tables
+        (`financial_periods`, `financial_facts`, `financial_ratios`, `peers`,
+        `subscription_snapshots`, `source_citations`) instead of extending the
+        flat `ipos` row.
+- [ ] **P1 — Financial analysis pipeline.**
+  - [ ] Parse financial statements from the RHP/annual reports with page-level
+        citations.
+  - [ ] Compute the formulas in section C of the framework and persist
+        `formula_version` with every derived ratio.
+  - [ ] Add data-quality states (`reported` / `calculated` / `estimated` /
+        `unverified` / `missing`) and a per-IPO completeness score.
+  - [ ] Test every formula, including missing inputs, zero denominators and
+        restated periods.
+- [ ] **P1 — Summary PDF that routes into the app.**
+  - [ ] Keep the shortlist summary PDF, but make it an index into the app.
+  - [ ] One page per IPO: snapshot, key metrics, top 3 strengths/risks, verdict,
+        confidence and data gaps.
+  - [ ] Add deep links to `/ipos/{id}` and `/ipos/{id}?tab=financials`, plus a QR
+        code, so the reader can jump straight into the in-depth analysis.
+  - [ ] Add `APP_BASE_URL` config (default `http://localhost:3000`); never put
+        secrets or API tokens in the PDF.
+  - [ ] Keep the detailed per-IPO PDF as the downloadable in-depth report.
+- [ ] **P1 — Local-model-only AI layer.**
+  - [ ] Provider abstraction (`backend/llm/client.py`) targeting Ollama,
+        llama.cpp or LM Studio. **No cloud model calls.**
+  - [ ] `LLM_ENABLED=false` falls back to deterministic templates, so the core
+        pipeline still works without a model.
+  - [ ] Five summaries (Business Quality, Financial Health, Valuation, Risk/Red
+        Flags, Overall Assessment) with evidence, conclusion, confidence, missing
+        information and citations.
+  - [ ] Wait for the user to confirm the installed model names/VRAM, then set
+        `LLM_MODEL` and `LLM_EMBED_MODEL`.
+  - [ ] Add prompt versioning, schema validation, caching, citation checks and a
+        golden-set evaluation before trusting any generated narrative.
+- [ ] **P2 — Post-listing feedback loop.**
+  - [ ] Track 1-week / 1-month / 3-month / 6-month / 1-year returns.
+  - [ ] Compare verdicts with outcomes and recalibrate scoring only with evidence.
+
 ### Cross-cutting engineering tasks
 
 - [x] **P0 — Add `requirements.txt`** (runtime) and `requirements-dev.txt`
@@ -727,9 +801,11 @@ pipeline fully functional.
 - [x] **P0 — Add `backend/src/main.py` CLI**: `scrape`, `analyze`, `report`, `run`
       (scrape → analyse → filter → PDF → email), with `--dry-run`, `--min-gmp`,
       `--source`, `--include-upcoming`, `--no-persist`, `--json` and `--db-path`.
-- [ ] **P1 — New DB tables** for `documents`, `document_chunks`,
-      `chat_sessions`, `chat_messages`, `email_log`, and `scrape_runs`
-      (`analysis_reports` already exists).
+- [x] **P1 — Core DB tables.** `scrape_runs`, `ipo_sources` and
+      `schema_migrations` exist alongside `ipos`, `gmp_history` and
+      `analysis_reports`.
+- [ ] **P1 — AI/chat DB tables** for `documents`, `document_chunks`,
+      `chat_sessions`, `chat_messages`, and `email_log`.
 - [ ] **P1 — API contract** documented via FastAPI's OpenAPI schema and shared
       TypeScript types generated for `frontend/`.
 - [ ] **P1 — Demo/seed mode** so the frontend can be developed without live scrapes
@@ -809,8 +885,12 @@ The project is considered "working" when a single command (or one local stack) c
 4. Render a dated PDF report with GMP trends and verdicts.
 5. Email that PDF to the configured recipients, with a run summary and logs.
 6. Run unattended on a schedule without creating duplicate rows or duplicate emails.
-7. Serve a Next.js dashboard showing the same shortlist, GMP history, and analysis.
-8. Answer free-text questions about current IPOs through a local LLM, with citations,
-   data timestamps, and no raw-SQL access.
-9. Start the whole stack locally with one command, with AI optional and the core
-   pipeline working even when no model runtime is available.
+7. Serve a Next.js dashboard showing the same shortlist, GMP history, and analysis,
+   with an **Overview** tab and an **In-depth** financial-analysis tab per IPO.
+8. Generate a **summary PDF** that lists the shortlist and deep-links (URL + QR)
+   into the app for the full analysis.
+9. Answer free-text questions about current IPOs through a **local** LLM, with
+   citations, data timestamps, and no raw-SQL access.
+10. Run every AI feature on local models only, with the core pipeline working even
+    when no model runtime is available.
+11. Start the whole stack locally with one command.

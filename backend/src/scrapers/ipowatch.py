@@ -9,12 +9,14 @@ price band, lot size, sector, subscription and listing date.
 from __future__ import annotations
 
 import logging
+from typing import Any
+
 import requests
 
 from src import config
-from src.database.db import save_ipo_with_gmp
 from src.models.ipo import IPO
-from src.utils.http import create_session
+from src.scrapers.base import BaseScraper, payload_rows
+from src.scrapers.errors import ParseError
 from src.utils.normalization import normalize_name
 from src.utils.parsing import (
     clean_text,
@@ -65,69 +67,80 @@ def _source_url(slug: str | None) -> str | None:
     return f"https://ipowatch.in/{slug.strip('/')}/"
 
 
+class IpoWatchScraper(BaseScraper):
+    """Scraper for the JSON API behind the IPO Watch GMP page."""
+
+    source_name = SOURCE
+
+    def fetch(self) -> Any:
+        return self.get_json(config.IPOWATCH_API_URL)
+
+    def rows(self, payload: Any) -> list[Any]:
+        try:
+            return payload_rows(payload, "data", "result")
+        except ParseError as error:
+            message = (
+                payload.get("message") if isinstance(payload, dict) else None
+            )
+            raise ParseError(
+                f"IPO Watch returned an unexpected payload: "
+                f"{message or payload!r}"
+            ) from error
+
+    def convert_row(self, item: dict) -> IPO:
+        name = clean_text(item.get("name"))
+        if not name:
+            raise ParseError("IPO Watch row has no company name")
+
+        lower, upper = parse_price_band(item.get("priceBand"))
+        issue_price = parse_float(item.get("issuePrice"))
+        if issue_price is None:
+            issue_price = upper if upper is not None else lower
+
+        return IPO(
+            name=name,
+            normalized_name=normalize_name(name),
+            ipo_id=parse_int(item.get("id")),
+            category=_category(item.get("type")),
+            status=clean_text(item.get("issueStatus")),
+            gmp=parse_float(item.get("gmp")),
+            gmp_percent=parse_float(item.get("premiumPct")),
+            issue_price=issue_price,
+            issue_price_lower=lower,
+            issue_price_upper=upper,
+            estimated_listing_price=parse_float(item.get("estPrice")),
+            ipo_size_cr=_issue_size_cr(item.get("issueSize")),
+            sector=clean_text(item.get("sector")),
+            exchange=_exchange(item.get("type")),
+            lot_size=clean_text(item.get("lotSize")),
+            subscription=parse_float(item.get("subscription")),
+            open_date=_as_iso_date(item.get("openDate")),
+            close_date=_as_iso_date(item.get("closeDate")),
+            listing_date=_as_iso_date(item.get("listingDate")),
+            source_url=_source_url(item.get("slug")),
+        )
+
+
+# --- Backwards-compatible module helpers -----------------------------------
+
+
 def fetch_ipo_data(session: requests.Session | None = None) -> list[dict]:
     """Fetch the IPO listing payload from IPO Watch."""
 
-    session = session or create_session()
-    response = session.get(
-        config.IPOWATCH_API_URL,
-        timeout=config.REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-
-    payload = response.json()
-    rows = payload.get("data") if isinstance(payload, dict) else None
-    if rows is None and isinstance(payload, dict):
-        rows = payload.get("result")
-
-    if not isinstance(rows, list):
-        message = payload.get("message") if isinstance(payload, dict) else None
-        raise ValueError(
-            f"IPO Watch returned an unexpected payload: {message or payload!r}"
-        )
-
-    return rows
+    scraper = IpoWatchScraper(session=session)
+    return scraper.rows(scraper.fetch())
 
 
 def convert_to_ipo(item: dict) -> IPO:
     """Map one IPO Watch row onto the common IPO model."""
 
-    name = clean_text(item.get("name"))
-    if not name:
-        raise ValueError("IPO Watch row has no company name")
-
-    lower, upper = parse_price_band(item.get("priceBand"))
-    issue_price = parse_float(item.get("issuePrice"))
-    if issue_price is None:
-        issue_price = upper if upper is not None else lower
-
-    return IPO(
-        name=name,
-        normalized_name=normalize_name(name),
-        ipo_id=parse_int(item.get("id")),
-        category=_category(item.get("type")),
-        status=clean_text(item.get("issueStatus")),
-        gmp=parse_float(item.get("gmp")),
-        gmp_percent=parse_float(item.get("premiumPct")),
-        issue_price=issue_price,
-        issue_price_lower=lower,
-        issue_price_upper=upper,
-        estimated_listing_price=parse_float(item.get("estPrice")),
-        ipo_size_cr=_issue_size_cr(item.get("issueSize")),
-        sector=clean_text(item.get("sector")),
-        exchange=_exchange(item.get("type")),
-        lot_size=clean_text(item.get("lotSize")),
-        subscription=parse_float(item.get("subscription")),
-        open_date=_as_iso_date(item.get("openDate")),
-        close_date=_as_iso_date(item.get("closeDate")),
-        listing_date=_as_iso_date(item.get("listingDate")),
-        source_url=_source_url(item.get("slug")),
-    )
+    return IpoWatchScraper().convert_row(item)
 
 
 def main() -> None:
     config.setup_logging()
-    rows = fetch_ipo_data()
+    scraper = IpoWatchScraper()
+    rows = scraper.rows(scraper.fetch())
 
     logger.info("Found %d IPOs\n", len(rows))
 
@@ -137,7 +150,7 @@ def main() -> None:
     for item in rows:
         # One malformed row must not abort the whole scrape.
         try:
-            ipo = convert_to_ipo(item)
+            ipo = scraper.convert_row(item)
 
             # Only save IPOs that are currently open. Derive status from
             # open/close dates when the source does not provide one.
@@ -147,7 +160,10 @@ def main() -> None:
             if status is not None and not is_open_status(status):
                 continue
 
-            db_id = save_ipo_with_gmp(ipo, source=SOURCE)
+            if status is not None:
+                ipo.status = status
+
+            db_id = scraper.save(ipo)
         except Exception as error:  # noqa: BLE001 - report and continue
             failed += 1
             logger.error("Failed to save row %r: %s", item.get("id"), error)
@@ -163,9 +179,7 @@ def main() -> None:
         )
         saved += 1
 
-    logger.info(
-        "Saved %d IPO records (%d failed).", saved, failed
-    )
+    logger.info("Saved %d IPO records (%d failed).", saved, failed)
 
 
 if __name__ == "__main__":

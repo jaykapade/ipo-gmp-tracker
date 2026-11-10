@@ -9,10 +9,12 @@ models, for asking questions about current IPOs.
 > **Status: working prototype.**
 > Scraping, SQLite persistence with numbered migrations and source provenance,
 > the 20% GMP filter, deterministic analysis, PDF reporting, optional SMTP email,
-> the read-only FastAPI service, the CLI, and the test suite work. The AI layer
-> and web frontend do not exist yet. The research specification for the
-> overview/in-depth analysis, PDF deep links and provider-agnostic AI layer lives
-> in [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
+> the read-only FastAPI service, the CLI, and the test suite work. A read-only
+> **Next.js 16 frontend** (dashboard, IPO detail, reports) now lives in
+> `frontend/`; its chat page is a placeholder and the AI layer is not implemented
+> yet. The research specification for the overview/in-depth analysis, PDF deep
+> links and provider-agnostic AI layer lives in
+> [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
 > [Roadmap / TODO](#roadmap--todo) for the agreed next steps.
 >
 > **Disclaimer:** This project is for personal research and automation. It is **not**
@@ -64,7 +66,7 @@ models, for asking questions about current IPOs.
 | **CLI** | `python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
 | **Tests** | `pytest` suite covering name normalisation, number/date parsing, active-status logic, the IPO Watch mapping, DB upserts/query helpers, analysis scoring/checklists, PDF generation, email dry-runs and the CLI. |
 | **AI (local or cloud)** | Not implemented. Planned as an **optional, provider-agnostic** layer for RHP extraction, analysis narratives, entity matching and chat. One common interface selects Ollama / LM Studio / llama.cpp locally, or OpenAI / Anthropic / Gemini / any OpenAI-compatible endpoint in the cloud. Switching is config-only. Local is the default; cloud requires explicit opt-in. Must never replace deterministic filters or calculations. |
-| **Web frontend** | Not implemented. Planned Next.js dashboard with an **Overview** tab and an **In-depth** financial-analysis tab per IPO, GMP charts, reports, and a streaming chat UI. |
+| **Web frontend** | Implemented in `frontend/` with Next.js 16 (App Router, Cache Components), React 19, TypeScript and Tailwind 4. Read-only dashboard with a default 20% GMP filter and status filter, IPO detail with GMP sparkline/history and stored analysis, and a reports page. Chat is an explicit placeholder; the Overview/In-depth split, search/sort, shadcn/ui, TanStack Table and Recharts are still planned. |
 | **API** | Implemented read-only FastAPI service (`python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
 
 ---
@@ -130,7 +132,12 @@ IPO Checker/
 │   │       ├── normalization.py   # name normalisation only
 │   │       └── parsing.py         # numbers, dates, date ranges, status logic
 │   └── tests/                     # pytest suite (inside backend/)
-├── frontend/                      # planned: Next.js frontend (currently empty)
+├── frontend/                      # Next.js 16 + TypeScript + Tailwind 4 app
+│   ├── .env.example               # NEXT_PUBLIC_API_BASE_URL
+│   ├── app/                       # App Router routes (dashboard, detail, reports, chat)
+│   ├── components/                # shell, dashboard, ipo, reports, ui primitives
+│   ├── lib/                       # API client, types, formatters
+│   └── README.md                  # frontend setup and limitations
 ├── docker-compose.yml             # planned: api + web + optional local model runtime
 └── backend/.venv/                 # local virtualenv (gitignored)
 ```
@@ -220,7 +227,7 @@ One row is created per source per scrape command (`scrape` or `run`).
 
 ## Setup
 
-Requires **Python 3.12+**.
+Requires **Python 3.12+** for the backend and **Node.js 20+** for the frontend.
 
 ```bash
 git clone <repo-url>
@@ -249,6 +256,22 @@ initialised explicitly (idempotent):
 cd backend
 python -m src.database.db
 ```
+
+### Frontend
+
+Start the API (see [Usage](#usage)), then install and run the app:
+
+```bash
+cd frontend
+cp .env.example .env.local   # optional; defaults to http://localhost:8000
+npm install
+npm run dev                  # http://localhost:3000
+```
+
+`NEXT_PUBLIC_API_BASE_URL` points the frontend at the API. Other scripts:
+`npm run build`, `npm run start`, `npm run lint` (Next 16 no longer lints during
+build), and `npx next typegen` after adding routes. See
+[`frontend/README.md`](frontend/README.md) for structure and current limitations.
 
 ---
 
@@ -572,7 +595,7 @@ health are still planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/ipos?status=&min_gmp_percent=20&q=&sort=` | Paginated, filterable IPO shortlist. |
+| `GET` | `/api/ipos?status=&min_gmp=20&limit=&offset=` | Paginated, filterable IPO shortlist (search/sort still planned). |
 | `GET` | `/api/ipos/{id}` | Full IPO record + latest GMP + source links. |
 | `GET` | `/api/ipos/{id}/overview` | Compact overview: business snapshot, issue structure, valuation, GMP, key financial trend, strengths/risks, completeness. |
 | `GET` | `/api/ipos/{id}/financials` | In-depth annual/quarterly statements, ratios, peer comparison and per-fact citations. |
@@ -702,8 +725,9 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
   - [ ] Add retention policy for old history rows.
 - [x] **P2 — Query helpers.** `get_candidates(min_gmp_percent)`,
       `get_gmp_history(ipo_id)`, and `get_ipo(id)`. SQL views are still optional.
-- [ ] **P2 — Data quality checks.** Duplicate names, missing prices, GMP outliers,
-      date inversions (close < open), stale rows.
+- [ ] **P2 — Data quality checks.**
+  - [x] Duplicate-name detection (`GET /api/quality/duplicates`, read-only).
+  - [ ] Missing prices, GMP outliers, date inversions (close < open), stale rows.
 
 ### 3. Minimum GMP of 20% or more
 
@@ -713,8 +737,9 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
       `(gmp / issue_price) * 100` and flag it as derived.
 - [x] **P1 — Filter definition.** Keep only active/upcoming IPOs whose **latest**
       GMP percentage is `>= 20.0`. Exclude listed/withdrawn/cancelled.
-- [ ] **P1 — Source disagreement handling.** When sources disagree, use the latest
-      observation, record both, and expose the spread on the candidate.
+- [x] **P1 — Source disagreement handling.** When sources disagree, use the latest
+      observation, keep both in `gmp_history`, and expose the spread through
+      `source_spread_percent` in the analysis metrics, checklist and risks.
 - [ ] **P2 — Guardrails.** Ignore zero/negative GMP, absurd outliers (`> 500%`),
       and rows with no `issue_price` (unless GMP% is provided directly).
 - [ ] **P2 — Tests.** Boundary tests at 19.9 / 20.0 / 20.1, missing percent, and
@@ -726,10 +751,11 @@ features stay **optional at runtime** even when their delivery is marked `P1`.
   - [x] `__init__.py`, `filters.py`, `metrics.py`, `scoring.py`, `checklist.py`.
   - [x] Output a typed `IPOAnalysis` object (pydantic) and persist it to the
         `analysis_reports` table (JSON payload + score + `created_at`).
-- [ ] **P1 — Automate the standard checks** from the
-      [analysis checklist](#ipo-analysis-checklist): GMP trend, valuation vs peers,
-      issue size, subscription, financials, objects of issue, red flags.
-      Numeric checks are automated; RHP checks are marked `manual`.
+- [x] **P1 — Automate the standard checks** from the
+      [analysis checklist](#ipo-analysis-checklist): GMP and trend, valuation, issue
+      size, subscription and cross-source consistency are scored automatically;
+      peer valuation, financials, objects of issue and red flags are marked
+      `manual` until the RHP pipeline lands.
 - [x] **P1 — Scoring.** Transparent weighted score (GMP 25%, valuation 25%,
       fundamentals 25%, subscription 15%, risk 10%) with per-factor explanations.
       No black-box model.
@@ -800,20 +826,26 @@ switching is config-only.
 
 ### 7. Build the Next.js frontend and IPO chat
 
-- [ ] **P1 — FastAPI service.** Read-only endpoints for IPOs, GMP history, analysis,
-      reports, plus `/api/chat` streaming and `/api/health`.
-- [ ] **P1 — Next.js scaffold** in `frontend/` (App Router, TypeScript, Tailwind,
-      shadcn/ui, TanStack Table, Recharts).
-- [ ] **P1 — Dashboard.** Active IPO table with the **20% minimum GMP** filter as
-      the default, status/close-date badges, search, sort, and data freshness.
-- [ ] **P1 — IPO detail page.** GMP trend chart, source history, metrics, score,
-      strengths/risks, and RHP citations.
+- [x] **P1 — FastAPI service.** Read-only endpoints for IPOs, details, GMP history,
+      candidates, analysis, reports, duplicate detection and provenance, plus
+      token-protected `POST /api/analyze` and `POST /api/reports`. `/api/chat`
+      streaming and admin scrape are still planned.
+- [x] **P1 — Next.js scaffold** in `frontend/` using Next.js 16 App Router, React 19,
+      TypeScript 5 and Tailwind 4, with Cache Components. shadcn/ui, TanStack Table
+      and Recharts are not installed yet; the table and GMP sparkline are local.
+- [x] **P1 — Dashboard.** Active IPO table with the **20% minimum GMP** filter as
+      the default, status filter, stats, empty/error/loading states and a backend
+      reachability panel. Search, sort and close-date badges are still planned.
+- [x] **P1 — IPO detail page.** GMP sparkline and source history, issue metrics,
+      stored score/checklist/strengths/risks/data gaps, and provenance. RHP
+      citations await the research data model.
 - [ ] **P1 — Chat backend.** Whitelisted tools, retrieval over current IPOs +
       analysis + RHP chunks, streaming SSE, citations, and refusal when data is
       missing.
 - [ ] **P1 — Chat UI.** Streaming messages, suggested prompts, citation chips,
-      "data as of" timestamp, and disclaimer banner.
-- [ ] **P2 — Reports page.** List, download, and optionally re-email generated PDFs.
+      "data as of" timestamp, and disclaimer banner. (Placeholder page exists.)
+- [x] **P2 — Reports page.** List and download generated PDFs. Re-emailing remains
+      planned and stays token-protected on the backend.
 - [ ] **P2 — Local deployment.** `docker-compose.yml` for api + web + optional local
       model runtime with a persistent `data/` volume and health checks;
       localhost-only by default.
@@ -900,7 +932,8 @@ are opt-in. Switching is a config change, not a code change.
       TypeScript types generated for `frontend/`.
 - [ ] **P1 — Demo/seed mode** so the frontend can be developed without live scrapes
       or an AI provider.
-- [ ] **P1 — Logging** via `logging`/`rich`; one log line per IPO and a run summary.
+- [x] **P1 — Logging** via `logging`; configured from `LOG_LEVEL` with a per-source
+      run summary and row-level errors. `rich` formatting is optional polish.
 - [x] **P1 — Tests** (`pytest`) for normalisation, parsing, status logic, IPO Watch
       mapping and DB upserts/query helpers.
 - [x] **P1 — Add `.env.example`** and load config through `python-dotenv`.

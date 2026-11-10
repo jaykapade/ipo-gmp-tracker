@@ -596,9 +596,9 @@ Implemented today: `GET /api/ipos`, `GET /api/ipos/{id}` (including GMP history,
 provenance and the latest analysis), `GET /api/candidates`, `GET`/`POST /api/reports`,
 `GET /api/reports/{filename}`, `GET /api/quality/duplicates` and `GET /api/health`.
 `POST /api/analyze` and `POST /api/reports` are token-protected. Search and sort
-(`q`, `sort`, `order`) are implemented on `GET /api/ipos`; the overview/in-depth
-financial endpoints, chat streaming, admin scrape and AI provider health are still
-planned.
+(`q`, `sort`, `order`) are implemented on `GET /api/ipos`; streaming chat is
+implemented on `POST /api/chat`; the overview/in-depth financial endpoints,
+admin scrape and AI provider health are still planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -847,11 +847,12 @@ switching is config-only.
 - [x] **P1 — IPO detail page.** Recharts GMP trend chart and source history, issue
       metrics, stored score/checklist/strengths/risks/data gaps, and provenance.
       RHP citations await the research data model.
-- [ ] **P1 — Chat backend.** Whitelisted tools, retrieval over current IPOs +
-      analysis + RHP chunks, streaming SSE, citations, and refusal when data is
-      missing.
-- [ ] **P1 — Chat UI.** Streaming messages, suggested prompts, citation chips,
-      "data as of" timestamp, and disclaimer banner. (Placeholder page exists.)
+- [x] **P1 — Chat backend.** Whitelisted `search_ipos` tool over current IPOs +
+      analysis, streaming SSE, citations, and refusal when data is missing
+      (`POST /api/chat`). Local LLM integration and RHP-chunk retrieval remain
+      planned (deterministic path is the default).
+- [x] **P1 — Chat UI.** Streaming messages, suggested prompts, citations,
+      "data as of" timestamp, stop/error handling. (Placeholder page replaced.)
 - [x] **P2 — Reports page.** List and download generated PDFs. Re-emailing remains
       planned and stays token-protected on the backend.
 - [ ] **P2 — Local deployment.** `docker-compose.yml` for api + web + optional local

@@ -145,4 +145,109 @@ export const api = {
   reportDownloadUrl(filename: string): string {
     return `${API_BASE_URL}/api/reports/${encodeURIComponent(filename)}`;
   },
+
+  /**
+   * Stream a chat answer as Server-Sent Events. Returns an async iterator of
+   * raw SSE lines; callers parse them into `{ type, data }` events. Intended
+   * for Client Components only (SSE requires the browser fetch/ReadableStream).
+   *
+   * Yields:
+   *   - { type: "thinking", data }
+   *   - { type: "tool_call", data }
+   *   - { type: "tool_result", data }
+   *   - { type: "content", data: { delta } }
+   *   - { type: "done", data }
+   *   - { type: "error", data }
+   */
+  chat: async function* (
+    message: string,
+    conversationId?: string | null,
+  ): AsyncGenerator<{ type: string; data: unknown }, void, unknown> {
+    const params = new URLSearchParams();
+    if (conversationId?.trim()) params.set("conversation_id", conversationId.trim());
+
+    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message, conversation_id: conversationId ?? undefined }),
+    });
+
+    if (!response.ok || !response.body) {
+      throw new ApiError(
+        `Chat request failed with status ${response.status}.`,
+        response.status,
+        "/api/chat",
+      );
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let eventIndex: number;
+        while ((eventIndex = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, eventIndex);
+          buffer = buffer.slice(eventIndex + 2);
+
+          const lines = block.split("\n");
+          let eventType: string | null = null;
+          const dataLines: string[] = [];
+          for (const line of lines) {
+            if (line.startsWith("event:")) {
+              eventType = line.slice("event:".length).trim();
+            } else if (line.startsWith("data:")) {
+              dataLines.push(line.slice("data:".length).trim());
+            }
+          }
+
+          if (eventType == null || dataLines.length === 0) continue;
+
+          const payload = dataLines.join("\n");
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            parsed = { raw: payload };
+          }
+
+          yield { type: eventType, data: parsed };
+        }
+      }
+
+      // Flush any trailing data without a final blank line.
+      if (buffer.trim()) {
+        const lines = buffer.split("\n");
+        let eventType: string | null = null;
+        const dataLines: string[] = [];
+        for (const line of lines) {
+          if (line.startsWith("event:")) {
+            eventType = line.slice("event:".length).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice("data:".length).trim());
+          }
+        }
+        if (eventType != null && dataLines.length > 0) {
+          const payload = dataLines.join("\n");
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            parsed = { raw: payload };
+          }
+          yield { type: eventType, data: parsed };
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  },
 };

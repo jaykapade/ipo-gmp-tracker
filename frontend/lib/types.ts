@@ -113,3 +113,36 @@ export interface HealthResponse {
   database: string;
   generated_at: string;
 }
+
+/** One chat message rendered in the conversation list. */
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  dataAsOf?: string | null;
+  citations?: ChatCitation[];
+  refusal?: boolean;
+}
+
+/** A citation attached to an assistant message. */
+export interface ChatCitation {
+  type: string;
+  label?: string;
+  ipo_id?: number;
+  name?: string;
+}
+
+/** Result of submitting one chat message. */
+export interface ChatResult {
+  conversationId: string;
+  dataAsOf: string | null;
+  citations: ChatCitation[];
+  refusal: boolean;
+}
+
+/** One Server-Sent Event received from the streaming chat endpoint. */
+export interface ChatEvent {
+  type: string;
+  data: unknown;
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -160,10 +160,24 @@ def list_ipos(
     offset: int = Query(default=0, ge=0),
     status: str | None = Query(default=None),
     min_gmp: float | None = Query(default=None, ge=0),
+    q: str | None = Query(default=None, max_length=100),
+    sort: Literal[
+        "name",
+        "gmp_percent",
+        "close_date",
+        "subscription",
+        "pe",
+        "issue_price",
+        "updated_at",
+    ] = Query(default="name"),
+    order: Literal["asc", "desc"] = Query(default="asc"),
 ) -> IPOPage:
     rows = db.list_ipos(
         status=status,
         min_gmp_percent=min_gmp,
+        q=q,
+        sort=sort,
+        order=order,
         limit=limit,
         offset=offset,
         db_path=_db_path(request),
@@ -171,6 +185,7 @@ def list_ipos(
     total = db.count_ipos(
         status=status,
         min_gmp_percent=min_gmp,
+        q=q,
         db_path=_db_path(request),
     )
 

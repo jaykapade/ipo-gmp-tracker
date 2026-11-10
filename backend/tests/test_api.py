@@ -113,6 +113,41 @@ def test_list_ipos_filters_by_status(client):
     assert names == {"Above Ltd", "Sunrise Packaging", "Sunrise Packagings"}
 
 
+def test_list_ipos_searches_name_case_insensitively(client):
+    response = client.get("/api/ipos", params={"q": "SUNRISE"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    names = {item["name"] for item in payload["items"]}
+    assert names == {"Sunrise Packaging", "Sunrise Packagings"}
+    assert payload["total"] == 2
+
+
+def test_list_ipos_sorts_by_gmp_descending(client):
+    response = client.get(
+        "/api/ipos",
+        params={"sort": "gmp_percent", "order": "desc"},
+    )
+
+    assert response.status_code == 200
+    percents = [item["gmp_percent"] for item in response.json()["items"]]
+    assert percents == sorted(percents, reverse=True)
+
+
+def test_list_ipos_defaults_to_name_ascending(client):
+    response = client.get("/api/ipos")
+
+    assert response.status_code == 200
+    names = [item["name"] for item in response.json()["items"]]
+    assert names == sorted(names)
+
+
+def test_list_ipos_rejects_unknown_sort_field(client):
+    response = client.get("/api/ipos", params={"sort": "gmp_percent; DROP TABLE ipos"})
+
+    assert response.status_code == 422
+
+
 def test_get_ipo_includes_history(client):
     listing = client.get("/api/ipos", params={"status": "Open"}).json()
     ipo_id = next(

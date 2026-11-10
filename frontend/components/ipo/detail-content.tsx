@@ -20,8 +20,8 @@ import {
 import type { IPODetail } from "@/lib/types";
 
 import { AnalysisPanel } from "./analysis-panel";
+import { GmpChart } from "./gmp-chart";
 import { GmpHistory } from "./gmp-history";
-import { GmpSparkline } from "./gmp-sparkline";
 
 function DetailRow({
   label,
@@ -239,7 +239,7 @@ export async function IpoDetailContent({
               title="GMP history"
               description={`${ipo.gmp_history.length} observations · latest ${formatDateTime(ipo.latest_gmp_recorded_at)}`}
             />
-            <GmpSparkline history={ipo.gmp_history} />
+            <GmpChart history={ipo.gmp_history} />
             <div className="border-t border-border">
               <GmpHistory history={ipo.gmp_history} />
             </div>

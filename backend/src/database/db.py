@@ -484,9 +484,21 @@ _SCORED_IPOS_CTE = """
 """
 
 
+_IPO_SORT_COLUMNS = {
+    "name": "name",
+    "gmp_percent": "latest_gmp_percent",
+    "close_date": "close_date",
+    "subscription": "subscription",
+    "pe": "pe",
+    "issue_price": "issue_price",
+    "updated_at": "latest_gmp_recorded_at",
+}
+
+
 def _ipo_filters(
     status: str | None,
     min_gmp_percent: float | None,
+    q: str | None = None,
 ) -> tuple[str, list[Any]]:
     """Build the optional WHERE clause shared by list/count queries."""
 
@@ -501,26 +513,48 @@ def _ipo_filters(
         conditions.append("latest_gmp_percent >= ?")
         parameters.append(float(min_gmp_percent))
 
+    if q and q.strip():
+        # ``instr`` treats % and _ literally, unlike LIKE.
+        conditions.append("instr(LOWER(name), LOWER(?)) > 0")
+        parameters.append(q.strip())
+
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     return where, parameters
+
+
+def _ipo_order_by(sort: str | None, order: str | None) -> str:
+    """Build a whitelisted ORDER BY clause, keeping missing values last."""
+
+    key = (sort or "name").strip().lower()
+    column = _IPO_SORT_COLUMNS.get(key)
+    if column is None:
+        raise ValueError(f"Unsupported sort field: {sort!r}")
+
+    direction = "DESC" if (order or "asc").strip().lower() == "desc" else "ASC"
+
+    # SQLite sorts NULLs first on ASC and last on DESC; force them last either way.
+    return f"ORDER BY {column} IS NULL, {column} {direction}, name ASC"
 
 
 def list_ipos(
     *,
     status: str | None = None,
     min_gmp_percent: float | None = None,
+    q: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 50,
     offset: int = 0,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Return IPOs (with their latest GMP) for the API/dashboard."""
 
-    where, parameters = _ipo_filters(status, min_gmp_percent)
+    where, parameters = _ipo_filters(status, min_gmp_percent, q)
     query = (
         f"{_SCORED_IPOS_CTE}"
         "SELECT * FROM scored "
         f"{where} "
-        "ORDER BY name ASC "
+        f"{_ipo_order_by(sort, order)} "
         "LIMIT ? OFFSET ?"
     )
     parameters.extend([int(limit), int(offset)])
@@ -535,11 +569,12 @@ def count_ipos(
     *,
     status: str | None = None,
     min_gmp_percent: float | None = None,
+    q: str | None = None,
     db_path: str | Path | None = None,
 ) -> int:
     """Count IPOs matching the same filters as :func:`list_ipos`."""
 
-    where, parameters = _ipo_filters(status, min_gmp_percent)
+    where, parameters = _ipo_filters(status, min_gmp_percent, q)
     query = f"{_SCORED_IPOS_CTE}SELECT COUNT(*) AS total FROM scored {where}"
 
     with connect(db_path) as connection:

@@ -70,9 +70,36 @@ async function apiFetch<T>(
   return (await response.json()) as T;
 }
 
+export const IPO_SORT_FIELDS = [
+  "name",
+  "gmp_percent",
+  "close_date",
+  "subscription",
+  "pe",
+  "issue_price",
+  "updated_at",
+] as const;
+
+export type IpoSortField = (typeof IPO_SORT_FIELDS)[number];
+export type SortOrder = "asc" | "desc";
+
+/** Human labels used by the dashboard's sort summary. */
+export const API_SORT_LABEL: Record<IpoSortField, string> = {
+  name: "company name",
+  gmp_percent: "latest GMP",
+  close_date: "close date",
+  subscription: "subscription",
+  pe: "P/E",
+  issue_price: "issue price",
+  updated_at: "latest GMP update",
+};
+
 export interface ListIposOptions {
   status?: string | null;
   minGmpPercent?: number | null;
+  q?: string | null;
+  sort?: IpoSortField;
+  order?: SortOrder;
   limit?: number;
   offset?: number;
 }
@@ -84,12 +111,23 @@ export const api = {
 
   listIpos(options: ListIposOptions = {}): Promise<IPOPage> {
     const params = new URLSearchParams();
-    const { status, minGmpPercent, limit = 100, offset = 0 } = options;
+    const {
+      status,
+      minGmpPercent,
+      q,
+      sort = "name",
+      order = "asc",
+      limit = 100,
+      offset = 0,
+    } = options;
 
     if (status) params.set("status", status);
     if (minGmpPercent != null) {
       params.set("min_gmp", String(minGmpPercent));
     }
+    if (q?.trim()) params.set("q", q.trim());
+    params.set("sort", sort);
+    params.set("order", order);
     params.set("limit", String(limit));
     params.set("offset", String(offset));
 

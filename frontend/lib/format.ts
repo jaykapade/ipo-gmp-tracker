@@ -27,6 +27,12 @@ const dateTime = new Intl.DateTimeFormat("en-IN", {
   timeZone: "Asia/Kolkata",
 });
 
+const chartDate = new Intl.DateTimeFormat("en-IN", {
+  day: "2-digit",
+  month: "short",
+  timeZone: "Asia/Kolkata",
+});
+
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseDate(value: string): Date | null {
@@ -65,6 +71,12 @@ export function formatDateTime(value: string | null | undefined): string {
   if (!value) return "—";
   const parsed = parseDate(value);
   return parsed ? `${dateTime.format(parsed)} IST` : value;
+}
+
+/** Short day/month label for chart axes. */
+export function formatChartDate(value: string): string {
+  const parsed = parseDate(value);
+  return parsed ? chartDate.format(parsed) : value;
 }
 
 export function formatFileSize(bytes: number): string {

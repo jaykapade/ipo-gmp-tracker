@@ -63,11 +63,11 @@ models, for asking questions about current IPOs.
 | **Analysis** | `src/analysis/` selects active IPOs whose **latest** GMP is at or above the configured threshold (default **20%**), derives `gmp_percent` when a source omits it, computes transparent weighted factors (GMP, valuation, fundamentals, subscription, risk), and produces a `Strong / Watch / Avoid` verdict with a checklist, strengths, risks and explicit data gaps. Results are persisted to `analysis_reports`. |
 | **Reporting** | `src/reporting/pdf.py` renders a ReportLab PDF with a summary table, per-IPO score breakdown, checklist, strengths/risks and data gaps. Reports are written to `reports/`. |
 | **Email** | `src/reporting/emailer.py` sends the PDF over SMTP (TLS by default) to comma-separated `EMAIL_TO` recipients. `--dry-run` validates the message without connecting. |
-| **CLI** | `python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
+| **CLI** | `uv run python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
 | **Tests** | `pytest` suite covering name normalisation, number/date parsing, active-status logic, the IPO Watch mapping, DB upserts/query helpers, analysis scoring/checklists, PDF generation, email dry-runs and the CLI. |
 | **AI (local or cloud)** | Not implemented. Planned as an **optional, provider-agnostic** layer for RHP extraction, analysis narratives, entity matching and chat. One common interface selects Ollama / LM Studio / llama.cpp locally, or OpenAI / Anthropic / Gemini / any OpenAI-compatible endpoint in the cloud. Switching is config-only. Local is the default; cloud requires explicit opt-in. Must never replace deterministic filters or calculations. |
-| **Web frontend** | Implemented in `frontend/` with Next.js 16 (App Router, Cache Components), React 19, TypeScript and Tailwind 4. Read-only dashboard with a default 20% GMP filter and status filter, IPO detail with GMP sparkline/history and stored analysis, and a reports page. Chat is an explicit placeholder; the Overview/In-depth split, search/sort, shadcn/ui, TanStack Table and Recharts are still planned. |
-| **API** | Implemented read-only FastAPI service (`python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
+| **Web frontend** | Implemented in `frontend/` with Next.js 16 (App Router, Cache Components), React 19, TypeScript, Tailwind 4 and Recharts. Read-only dashboard with a default 20% GMP filter, status filter, company search and API-driven column sorting, IPO detail with a GMP trend chart/history and stored analysis, and a reports page. Chat is an explicit placeholder; the Overview/In-depth split, shadcn/ui and TanStack Table are still planned. |
+| **API** | Implemented read-only FastAPI service (`uv run python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
 
 ---
 
@@ -227,25 +227,24 @@ One row is created per source per scrape command (`scrape` or `run`).
 
 ## Setup
 
-Requires **Python 3.12+** for the backend and **Node.js 20+** for the frontend.
+Requires **Python 3.12+**, **uv**, **Node.js 20+** and **pnpm**.
+
+The backend is managed with **uv** and the frontend with **pnpm**. Plain
+`pip`/`npm` equivalents still work, but the commands below assume both tools are
+installed.
 
 ```bash
 git clone <repo-url>
 cd "IPO Checker"
 
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-# source .venv/bin/activate
+cd backend
+uv venv                         # creates backend/.venv (Python 3.12+)
+uv pip install -r requirements.txt
 
-pip install -r backend/requirements.txt
-```
+# For development (adds pytest):
+uv pip install -r requirements-dev.txt
 
-For development (adds pytest):
-
-```bash
-pip install -r backend/requirements-dev.txt
+cd ..
 ```
 
 Copy `backend/.env.example` to `backend/.env` only if you need to override a default.
@@ -254,7 +253,7 @@ initialised explicitly (idempotent):
 
 ```bash
 cd backend
-python -m src.database.db
+uv run python -m src.database.db
 ```
 
 ### Frontend
@@ -264,47 +263,48 @@ Start the API (see [Usage](#usage)), then install and run the app:
 ```bash
 cd frontend
 cp .env.example .env.local   # optional; defaults to http://localhost:8000
-npm install
-npm run dev                  # http://localhost:3000
+pnpm install
+pnpm dev                     # http://localhost:3000
 ```
 
 `NEXT_PUBLIC_API_BASE_URL` points the frontend at the API. Other scripts:
-`npm run build`, `npm run start`, `npm run lint` (Next 16 no longer lints during
-build), and `npx next typegen` after adding routes. See
+`pnpm build`, `pnpm start`, `pnpm lint` (Next 16 no longer lints during build),
+and `pnpm typegen` after adding routes. See
 [`frontend/README.md`](frontend/README.md) for structure and current limitations.
 
 ---
 
 ## Usage
 
-Run from the `backend/` directory so `src.` imports resolve.
+Run from the `backend/` directory so `src.` imports resolve. `uv run` executes the
+command inside `backend/.venv`, so activating the venv manually is unnecessary.
 
 ```bash
 cd backend
 
 # Scrape every source and persist the results
-python -m src.main scrape
+uv run python -m src.main scrape
 
 # One source at a time
-python -m src.main scrape --source ipowatch
-python -m src.main scrape --source investorgain
+uv run python -m src.main scrape --source ipowatch
+uv run python -m src.main scrape --source investorgain
 
 # Screen + analyse candidates, persist analysis_reports, print a summary
-python -m src.main analyze
+uv run python -m src.main analyze
 
 # Machine-readable output
-python -m src.main analyze --json
+uv run python -m src.main analyze --json
 
 # Generate a PDF (written to reports/ by default)
-python -m src.main report
-python -m src.main report --output reports/today.pdf
+uv run python -m src.main report
+uv run python -m src.main report --output reports/today.pdf
 
 # Validate the email without sending it
-python -m src.main report --email --dry-run
+uv run python -m src.main report --email --dry-run
 
 # Full pipeline: scrape -> analyse -> PDF -> email
-python -m src.main run
-python -m src.main run --email
+uv run python -m src.main run
+uv run python -m src.main run --email
 ```
 
 Useful flags:
@@ -323,14 +323,14 @@ Useful flags:
 The low-level scrapers still run on their own:
 
 ```bash
-python -m src.scrapers.investorgain
-python -m src.scrapers.ipowatch
+uv run python -m src.scrapers.investorgain
+uv run python -m src.scrapers.ipowatch
 ```
 
 Inspecting the data:
 
 ```bash
-python - <<'PY'
+uv run python - <<'PY'
 import sqlite3
 c = sqlite3.connect("data/ipo_intelligence.db")
 for row in c.execute("""
@@ -342,6 +342,12 @@ for row in c.execute("""
 """):
     print(row)
 PY
+```
+
+Run the backend test suite from `backend/`:
+
+```bash
+uv run pytest
 ```
 
 ---
@@ -589,13 +595,14 @@ Scheduled job (backend/src/main.py): scrape → analyse → filter (GMP ≥ 20%)
 Implemented today: `GET /api/ipos`, `GET /api/ipos/{id}` (including GMP history,
 provenance and the latest analysis), `GET /api/candidates`, `GET`/`POST /api/reports`,
 `GET /api/reports/{filename}`, `GET /api/quality/duplicates` and `GET /api/health`.
-`POST /api/analyze` and `POST /api/reports` are token-protected. Search/sort, the
-overview/in-depth financial endpoints, chat streaming, admin scrape and AI provider
-health are still planned.
+`POST /api/analyze` and `POST /api/reports` are token-protected. Search and sort
+(`q`, `sort`, `order`) are implemented on `GET /api/ipos`; the overview/in-depth
+financial endpoints, chat streaming, admin scrape and AI provider health are still
+planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/ipos?status=&min_gmp=20&limit=&offset=` | Paginated, filterable IPO shortlist (search/sort still planned). |
+| `GET` | `/api/ipos?q=&status=&min_gmp=20&sort=&order=&limit=&offset=` | Paginated, filterable IPO shortlist. `q` searches company names; `sort` is one of `name`, `gmp_percent`, `close_date`, `subscription`, `pe`, `issue_price`, `updated_at`; `order` is `asc`/`desc`. |
 | `GET` | `/api/ipos/{id}` | Full IPO record + latest GMP + source links. |
 | `GET` | `/api/ipos/{id}/overview` | Compact overview: business snapshot, issue structure, valuation, GMP, key financial trend, strengths/risks, completeness. |
 | `GET` | `/api/ipos/{id}/financials` | In-depth annual/quarterly statements, ratios, peer comparison and per-fact citations. |
@@ -639,10 +646,10 @@ ollama pull qwen2.5:7b-instruct
 ollama pull nomic-embed-text
 
 # 2. Backend
-uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+cd backend && uv run python -m src.main serve --port 8000
 
 # 3. Frontend
-cd web && npm install && npm run dev
+cd frontend && pnpm install && pnpm dev
 ```
 
 To use a cloud provider instead, set `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`
@@ -831,14 +838,15 @@ switching is config-only.
       token-protected `POST /api/analyze` and `POST /api/reports`. `/api/chat`
       streaming and admin scrape are still planned.
 - [x] **P1 — Next.js scaffold** in `frontend/` using Next.js 16 App Router, React 19,
-      TypeScript 5 and Tailwind 4, with Cache Components. shadcn/ui, TanStack Table
-      and Recharts are not installed yet; the table and GMP sparkline are local.
+      TypeScript 5, Tailwind 4 and Recharts, with Cache Components and pnpm.
+      shadcn/ui and TanStack Table are not installed yet; the table is local.
 - [x] **P1 — Dashboard.** Active IPO table with the **20% minimum GMP** filter as
-      the default, status filter, stats, empty/error/loading states and a backend
-      reachability panel. Search, sort and close-date badges are still planned.
-- [x] **P1 — IPO detail page.** GMP sparkline and source history, issue metrics,
-      stored score/checklist/strengths/risks/data gaps, and provenance. RHP
-      citations await the research data model.
+      the default, status filter, company search, API-driven column sorting, stats,
+      empty/error/loading states and a backend reachability panel. Close-date
+      badges are still planned.
+- [x] **P1 — IPO detail page.** Recharts GMP trend chart and source history, issue
+      metrics, stored score/checklist/strengths/risks/data gaps, and provenance.
+      RHP citations await the research data model.
 - [ ] **P1 — Chat backend.** Whitelisted tools, retrieval over current IPOs +
       analysis + RHP chunks, streaming SSE, citations, and refusal when data is
       missing.

@@ -1,25 +1,44 @@
 import Link from "next/link";
 
+import type { IpoSortField } from "@/lib/api";
+
 const STATUS_OPTIONS = ["Open", "Upcoming", "Closed", "Listed"] as const;
 
-export function IpoFilters({
-  minGmp,
-  status,
-}: {
+export interface DashboardQuery {
   minGmp: number;
   status?: string;
-}) {
+  q?: string;
+  sort: IpoSortField;
+  order: "asc" | "desc";
+}
+
+export function IpoFilters({ query }: { query: DashboardQuery }) {
   return (
     <form
       method="get"
       className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 shadow-sm sm:flex-row sm:flex-wrap sm:items-end"
     >
+      <input type="hidden" name="sort" value={query.sort} />
+      <input type="hidden" name="order" value={query.order} />
+
+      <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
+        Search company
+        <input
+          type="search"
+          name="q"
+          defaultValue={query.q}
+          maxLength={100}
+          placeholder="e.g. Sunrise"
+          className="h-9 w-full min-w-44 rounded-md border border-border bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground/70 sm:w-48"
+        />
+      </label>
+
       <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
         Minimum GMP %
         <input
           type="number"
           name="min_gmp"
-          defaultValue={minGmp}
+          defaultValue={query.minGmp}
           min={0}
           max={1000}
           step={1}
@@ -31,7 +50,7 @@ export function IpoFilters({
         Status
         <select
           name="status"
-          defaultValue={status ?? ""}
+          defaultValue={query.status ?? ""}
           className="h-9 min-w-36 rounded-md border border-border bg-background px-3 text-sm text-foreground"
         >
           <option value="">All statuses</option>

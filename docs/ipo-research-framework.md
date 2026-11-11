@@ -10,10 +10,13 @@
 > invents a data point, changes a calculation, or overrides the 20% GMP filter.
 > All providers sit behind one interface, so switching is config-only.
 >
-> **Status.** Specification only. The current prototype stores IPO identity, GMP
-> history, issue pricing and a lightweight deterministic analysis. The research
-> tables, document store and provider-agnostic AI layer described here are roadmap
-> items.
+> **Status.** Specification only — though the provider-agnostic AI layer it
+> assumes is now implemented (`backend/src/llm/`: one `LLMProvider` contract,
+> config-only switching between local and cloud providers, local-first
+> defaults). The current prototype stores IPO identity, GMP history, issue
+> pricing and a lightweight deterministic analysis. The research tables,
+> document store, financial pipeline and AI summaries described here are
+> roadmap items.
 
 ---
 

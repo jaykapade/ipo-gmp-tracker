@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 
 from src import config
 from src.api.schemas import (
+    AIHealth,
     AnalyzeRequest,
     AnalyzeResponse,
     DuplicatePairOut,
@@ -23,6 +24,7 @@ from src.api.schemas import (
     ReportInfo,
 )
 from src.database import db
+from src.llm import LLMClient
 from src.models.analysis import IPOAnalysis
 from src.pipeline import analyze_pipeline
 from src.reporting import generate_report
@@ -146,10 +148,12 @@ def api_index() -> dict[str, str]:
 
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 def health(request: Request) -> HealthResponse:
+    llm_client: LLMClient = request.app.state.llm
     return HealthResponse(
         status="ok",
         database=str(_db_path(request) or config.DB_PATH),
         generated_at=datetime.now(UTC).isoformat(),
+        ai=AIHealth(**llm_client.status()),
     )
 
 

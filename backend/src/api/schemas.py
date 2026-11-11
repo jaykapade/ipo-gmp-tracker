@@ -9,10 +9,23 @@ from pydantic import BaseModel, Field
 from src.models.analysis import IPOAnalysis
 
 
+class AIHealth(BaseModel):
+    """Configured AI provider availability (never triggers a generation)."""
+
+    enabled: bool
+    provider: str
+    model: str
+    embed_provider: str
+    embed_model: str
+    available: bool
+    detail: str
+
+
 class HealthResponse(BaseModel):
     status: str
     database: str
     generated_at: str
+    ai: AIHealth
 
 
 class IPOSummary(BaseModel):

@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import create_app
+from src.config import LLMSettings
 from src.database import db
 from src.models.ipo import IPO
 from src.utils.normalization import normalize_name
@@ -68,6 +69,9 @@ def client(tmp_path):
         db_path=db_path,
         report_dir=report_dir,
         api_token="test-token",
+        # Pin AI off so a developer's .env (LLM_ENABLED=true) cannot make
+        # tests reach a real model runtime.
+        llm_settings=LLMSettings(),
     )
 
     with TestClient(app) as test_client:
@@ -81,6 +85,13 @@ def test_health(client):
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["database"].endswith("test.db")
+
+    ai = payload["ai"]
+    assert ai["enabled"] is False
+    assert ai["available"] is False
+    assert "LLM_ENABLED=false" in ai["detail"]
+    assert ai["provider"]
+    assert ai["model"]
 
 
 def test_list_ipos_paginates_and_counts(client):

@@ -20,6 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from src import config
 from src.api.chat import router as chat_router
 from src.api.routes import router
+from src.config import LLMSettings
+from src.llm import LLMClient
 
 
 def create_app(
@@ -28,6 +30,7 @@ def create_app(
     report_dir: str | Path | None = None,
     api_token: str | None = None,
     cors_origins: tuple[str, ...] | None = None,
+    llm_settings: LLMSettings | None = None,
 ) -> FastAPI:
     """Build an app with optional per-instance paths (used by tests)."""
 
@@ -46,6 +49,9 @@ def create_app(
     )
     app.state.api_token = (
         config.API_TOKEN if api_token is None else api_token
+    )
+    app.state.llm = LLMClient(
+        llm_settings if llm_settings is not None else config.LLM
     )
 
     app.add_middleware(

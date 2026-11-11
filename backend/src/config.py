@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -85,6 +86,15 @@ def _env_path(name: str, default: str) -> Path:
     if not path.is_absolute():
         path = REPO_ROOT / path
     return path
+
+
+def _env_optional(name: str) -> str | None:
+    """Return a trimmed env value, or ``None`` when unset/blank."""
+
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
 
 
 def current_fiscal_year(today: date | None = None) -> str:
@@ -168,3 +178,58 @@ CORS_ORIGINS = tuple(
     ).split(",")
     if origin.strip()
 )
+
+
+# --- AI / LLM (optional, provider-agnostic) ----------------------------------
+#
+# Switching providers is a config change, not a code change. Local providers
+# are the default; cloud providers additionally require LLM_ALLOW_CLOUD=true
+# and LLM_API_KEY so nothing leaves the machine by accident.
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    """AI provider selection, read from the ``LLM_*`` environment variables."""
+
+    enabled: bool = False
+    provider: str = "ollama"
+    base_url: str | None = None
+    api_key: str = ""
+    model: str = "qwen2.5:7b-instruct"
+    embed_provider: str = "ollama"
+    embed_model: str = "nomic-embed-text"
+    embed_base_url: str | None = None
+    fallback_providers: tuple[str, ...] = ()
+    allow_cloud: bool = False
+    temperature: float = 0.0
+    timeout_seconds: float = 120.0
+    max_context: int = 8192
+    cache: bool = True
+
+    @classmethod
+    def from_env(cls) -> LLMSettings:
+        """Build settings from the current environment."""
+
+        return cls(
+            enabled=_env_bool("LLM_ENABLED", False),
+            provider=_env("LLM_PROVIDER", "ollama").lower(),
+            base_url=_env_optional("LLM_BASE_URL"),
+            api_key=_env("LLM_API_KEY", ""),
+            model=_env("LLM_MODEL", "qwen2.5:7b-instruct"),
+            embed_provider=_env("LLM_EMBED_PROVIDER", "ollama").lower(),
+            embed_model=_env("LLM_EMBED_MODEL", "nomic-embed-text"),
+            embed_base_url=_env_optional("LLM_EMBED_BASE_URL"),
+            fallback_providers=tuple(
+                name.strip()
+                for name in _env("LLM_FALLBACK_PROVIDERS", "").split(",")
+                if name.strip()
+            ),
+            allow_cloud=_env_bool("LLM_ALLOW_CLOUD", False),
+            temperature=_env_float("LLM_TEMPERATURE", 0.0),
+            timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 120.0),
+            max_context=_env_int("LLM_MAX_CONTEXT", 8192),
+            cache=_env_bool("LLM_CACHE", True),
+        )
+
+
+LLM = LLMSettings.from_env()

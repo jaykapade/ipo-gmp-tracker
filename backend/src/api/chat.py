@@ -1,9 +1,15 @@
 """Streaming chat endpoint grounded in whitelisted data tools.
 
-The endpoint never exposes raw SQL to the model layer. Every answer is composed
-from deterministic database lookups (``list_ipos``, ``get_ipo``,
+The endpoint never exposes raw SQL to the model layer. Every answer is
+composed from deterministic database lookups (``list_ipos``, ``get_ipo``,
 ``get_gmp_history`` and ``get_latest_analysis``) and streamed to the client as
 Server-Sent Events. Missing data triggers an explicit refusal instead of a guess.
+
+With ``LLM_ENABLED=false`` (the default) the deterministic path below writes
+the answer. When a provider is configured, the same grounded rows are handed
+to the provider-agnostic AI layer to phrase the answer; the model only sees the
+JSON context built from whitelisted tool results, never the database, and any
+provider failure falls back to the deterministic answer.
 
 Events (``data: <json>`` lines):
 
@@ -11,11 +17,9 @@ Events (``data: <json>`` lines):
 * ``tool_call`` — a whitelisted tool is being invoked
 * ``tool_result`` — tool output (summarised; full payloads stay server-side)
 * ``content`` — incremental answer text (``delta`` field)
-* ``done`` — final metadata (conversation id, data timestamp, citations)
+* ``done`` — final metadata (conversation id, data timestamp, citations,
+  which provider composed the answer)
 * ``error`` — something went wrong
-
-The local-first AI provider hook is intentionally left as a future integration;
-with ``LLM_ENABLED=false`` (the default) the deterministic path below is used.
 """
 
 from __future__ import annotations
@@ -25,13 +29,17 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.database import db
+from src.llm import LLMError, LLMMessage
+
+if TYPE_CHECKING:
+    from src.llm import LLMClient
 
 router = APIRouter(prefix="/api")
 
@@ -122,15 +130,224 @@ def _latest_recorded_at(rows: list[dict[str, Any]]) -> str | None:
     return max(dates) if dates else None
 
 
+# --- AI provider integration -------------------------------------------------
+
+CHAT_PROMPT_VERSION = "chat-v1"
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are the IPO Checker assistant. Answer the user's question using "
+    "ONLY the JSON context supplied in the user message.\n"
+    "- Never invent or estimate numbers; if a value is null or absent, say "
+    "it is not disclosed.\n"
+    "- Include the data_as_of timestamp when one is provided.\n"
+    "- Do not recommend buying, selling or applying; this is research, not "
+    "investment advice.\n"
+    "- Be concise: at most 150 words, no headings and no markdown lists."
+)
+
+
+def _build_answer_context(
+    primary: dict[str, Any],
+    detail: dict[str, Any],
+    latest: dict[str, Any] | None,
+    analysis: dict[str, Any] | None,
+    matches: list[dict[str, Any]],
+    data_as_of: str | None,
+) -> dict[str, Any]:
+    """Collect the grounded rows the answer (AI or deterministic) may use."""
+
+    def first(key: str) -> Any:
+        """Prefer the detail row, then the scored list row."""
+
+        if detail.get(key) is not None:
+            return detail[key]
+        return primary.get(key)
+
+    return {
+        "data_as_of": data_as_of,
+        "ipo": {
+            "id": primary.get("id"),
+            "name": first("name"),
+            "category": first("category"),
+            "status": first("status"),
+            "exchange": first("exchange"),
+            "sector": first("sector"),
+            "issue_price": first("issue_price"),
+            "issue_price_lower": first("issue_price_lower"),
+            "issue_price_upper": first("issue_price_upper"),
+            "ipo_size_cr": first("ipo_size_cr"),
+            "lot_size": first("lot_size"),
+            "subscription": first("subscription"),
+            "pe": first("pe"),
+            "open_date": first("open_date"),
+            "close_date": first("close_date"),
+            "listing_date": first("listing_date"),
+            "source_url": first("source_url"),
+        },
+        "latest_gmp": {
+            "gmp": latest.get("gmp"),
+            "gmp_percent": latest.get("gmp_percent"),
+            "source": latest.get("source"),
+            "recorded_at": latest.get("recorded_at"),
+        }
+        if latest
+        else None,
+        "analysis": analysis,
+        "other_matches": [m.get("name") for m in matches[1:]],
+    }
+
+
+def _build_chat_messages(
+    message: str, context: dict[str, Any]
+) -> list[LLMMessage]:
+    """Compose the grounded prompt pair for the AI provider."""
+
+    return [
+        LLMMessage(role="system", content=_CHAT_SYSTEM_PROMPT),
+        LLMMessage(
+            role="user",
+            content=(
+                f"{message}\n\n"
+                "Context (JSON, assembled deterministically from the "
+                "database by whitelisted tools):\n"
+                f"{json.dumps(context, ensure_ascii=False, default=str)}"
+            ),
+        ),
+    ]
+
+
+async def _generate_answer(
+    message: str,
+    context: dict[str, Any],
+    llm_client: LLMClient,
+) -> tuple[str | None, dict[str, Any]]:
+    """Ask the configured provider to phrase the grounded answer.
+
+    Returns ``(None, reason)`` when the AI layer is unavailable so the caller
+    can fall back to the deterministic composition — the answer must never
+    depend on a model runtime being present.
+    """
+
+    try:
+        response = await asyncio.to_thread(
+            llm_client.generate,
+            _build_chat_messages(message, context),
+            prompt_version=CHAT_PROMPT_VERSION,
+        )
+    except LLMError as exc:
+        return None, {"used": False, "reason": str(exc)}
+
+    text = (response.text or "").strip()
+    if not text:
+        return None, {"used": False, "reason": "provider returned no text"}
+
+    return text, {
+        "used": True,
+        "provider": response.provider,
+        "model": response.model,
+    }
+
+
 async def _sleep() -> None:
     """Yield to the event loop so SSE chunks flush incrementally."""
     await asyncio.sleep(0)
+
+
+def _compose_grounded_answer(
+    *,
+    primary: dict[str, Any],
+    detail: dict[str, Any],
+    latest: dict[str, Any] | None,
+    analysis: dict[str, Any] | None,
+    matches: list[dict[str, Any]],
+    data_as_of: str | None,
+    citations: tuple[str, str, str | None],
+) -> str:
+    """Deterministically compose the grounded answer (no AI required).
+
+    ``citations`` holds the pre-registered citation markers
+    ``(gmp, detail, analysis)`` so this text and any AI-generated text cite
+    exactly the same tool results.
+    """
+
+    gmp_marker, detail_marker, analysis_marker = citations
+    answer_parts: list[str] = []
+
+    name = primary.get("name") or detail.get("name") or "this IPO"
+    answer_parts.append("Based on the latest data")
+
+    if data_as_of:
+        answer_parts.append(f" (as of {data_as_of})")
+    answer_parts.append(
+        f": **{name}** — {detail.get('category') or 'IPO'} on "
+        f"{detail.get('exchange') or 'the exchange'}."
+    )
+
+    gmp_percent = latest.get("gmp_percent") if latest else primary.get("gmp_percent")
+    gmp = latest.get("gmp") if latest else primary.get("gmp")
+    source = latest.get("source") if latest else primary.get("latest_gmp_source")
+
+    answer_parts.append(
+        f" Its latest GMP is {_format_percent(gmp_percent)}"
+    )
+    if gmp is not None:
+        answer_parts.append(f" (₹{gmp:,.2f})")
+    answer_parts.append(
+        f" from {source or 'an undisclosed source'}{gmp_marker}.\n"
+    )
+
+    close_date = detail.get("close_date") or primary.get("close_date")
+    issue_price = detail.get("issue_price") or primary.get("issue_price")
+    subscription = detail.get("subscription") or primary.get("subscription")
+    pe = detail.get("pe") or primary.get("pe")
+
+    answer_parts.append(
+        f"It closes {close_date or 'on an undisclosed date'}, with an issue price "
+        f"of {_format_money(issue_price)}"
+    )
+    if subscription is not None:
+        answer_parts.append(f", subscribed {subscription:.1f}x")
+    if pe is not None:
+        answer_parts.append(f", P/E of {pe:.1f}")
+    answer_parts.append(f".{detail_marker}\n")
+
+    if analysis:
+        verdict = analysis.get("verdict")
+        score = analysis.get("score")
+        answer_parts.append(
+            f"Deterministic analysis: {verdict or 'Watch'} verdict "
+            f"(score {score:.0f}/100)."
+        )
+        strengths = analysis.get("strengths") or []
+        risks = analysis.get("risks") or []
+        gaps = analysis.get("data_gaps") or []
+        if strengths:
+            answer_parts.append(
+                f" Strengths: {', '.join(strengths[:3])}."
+            )
+        if risks:
+            answer_parts.append(f" Risks: {', '.join(risks[:3])}.")
+        if gaps:
+            answer_parts.append(f" Data gaps: {', '.join(gaps[:3])}.")
+        if analysis_marker:
+            answer_parts.append(f"{analysis_marker}\n")
+
+    if len(matches) > 1:
+        also = ", ".join(
+            f"{m.get('name')}" for m in matches[1:]
+        )
+        answer_parts.append(
+            f"\nAlso matched: {also}. Ask about one by name for details."
+        )
+
+    return "".join(answer_parts)
 
 
 async def _stream_chat(
     message: str,
     conversation_id: str | None,
     db_path: Any,
+    llm_client: LLMClient | None = None,
 ) -> AsyncIterator[str]:
     conversation_id = conversation_id or str(uuid.uuid4())
     sources: list[dict[str, Any]] = []
@@ -169,10 +386,10 @@ async def _stream_chat(
         await _sleep()
 
     # --- Compose the grounded answer ---------------------------------------
-    answer_parts: list[str] = []
 
     if not matches:
         total = db.count_ipos(db_path=db_path)
+        answer_parts: list[str] = []
         answer_parts.append(
             f"I couldn't find any IPO matching your question in the current "
             f"database ({total} IPOs stored). "
@@ -199,6 +416,7 @@ async def _stream_chat(
                 "citations": sources,
                 "primary_ipo_id": None,
                 "refusal": True,
+                "llm": {"used": False},
             },
         )
         return
@@ -213,75 +431,36 @@ async def _stream_chat(
 
     data_as_of = _latest_recorded_at(history) or primary.get("latest_gmp_recorded_at")
 
-    name = primary.get("name") or detail.get("name") or "this IPO"
-    answer_parts.append("Based on the latest data")
+    # Register the underlying data sources once — both answer paths (AI and
+    # deterministic) cite the same whitelisted tool results.
+    gmp_marker = cite({"type": "gmp_history", "ipo_id": ipo_id})
+    detail_marker = cite({"type": "ipo_detail", "ipo_id": ipo_id})
+    analysis_marker = cite({"type": "analysis", "ipo_id": ipo_id}) if analysis else None
 
-    if data_as_of:
-        answer_parts.append(f" (as of {data_as_of})")
-    answer_parts.append(
-        f": **{name}** — {detail.get('category') or 'IPO'} on "
-        f"{detail.get('exchange') or 'the exchange'}."
-    )
+    answer: str | None = None
+    llm_info: dict[str, Any] = {"used": False}
 
-    gmp_percent = latest.get("gmp_percent") if latest else primary.get("gmp_percent")
-    gmp = latest.get("gmp") if latest else primary.get("gmp")
-    source = latest.get("source") if latest else primary.get("latest_gmp_source")
-
-    answer_parts.append(
-        f" Its latest GMP is {_format_percent(gmp_percent)}"
-    )
-    if gmp is not None:
-        answer_parts.append(f" (₹{gmp:,.2f})")
-    answer_parts.append(
-        f" from {source or 'an undisclosed source'}{cite({'type': 'gmp_history', 'ipo_id': ipo_id})}.\n"
-    )
-
-    close_date = detail.get("close_date") or primary.get("close_date")
-    issue_price = detail.get("issue_price") or primary.get("issue_price")
-    subscription = detail.get("subscription") or primary.get("subscription")
-    pe = detail.get("pe") or primary.get("pe")
-
-    answer_parts.append(
-        f"It closes {close_date or 'on an undisclosed date'}, with an issue price "
-        f"of {_format_money(issue_price)}"
-    )
-    if subscription is not None:
-        answer_parts.append(f", subscribed {subscription:.1f}x")
-    if pe is not None:
-        answer_parts.append(f", P/E of {pe:.1f}")
-    answer_parts.append(f".{cite({'type': 'ipo_detail', 'ipo_id': ipo_id})}\n")
-
-    if analysis:
-        verdict = analysis.get("verdict")
-        score = analysis.get("score")
-        answer_parts.append(
-            f"Deterministic analysis: {verdict or 'Watch'} verdict "
-            f"(score {score:.0f}/100)."
+    if llm_client is not None and llm_client.enabled:
+        yield _sse(
+            "thinking", {"status": "composing the answer with the AI provider"}
         )
-        strengths = analysis.get("strengths") or []
-        risks = analysis.get("risks") or []
-        gaps = analysis.get("data_gaps") or []
-        if strengths:
-            answer_parts.append(
-                f" Strengths: {', '.join(strengths[:3])}."
-            )
-        if risks:
-            answer_parts.append(f" Risks: {', '.join(risks[:3])}.")
-        if gaps:
-            answer_parts.append(f" Data gaps: {', '.join(gaps[:3])}.")
-        answer_parts.append(
-            f"{cite({'type': 'analysis', 'ipo_id': ipo_id})}\n"
+        await _sleep()
+        context = _build_answer_context(
+            primary, detail, latest, analysis, matches, data_as_of
+        )
+        answer, llm_info = await _generate_answer(message, context, llm_client)
+
+    if answer is None:
+        answer = _compose_grounded_answer(
+            primary=primary,
+            detail=detail,
+            latest=latest,
+            analysis=analysis,
+            matches=matches,
+            data_as_of=data_as_of,
+            citations=(gmp_marker, detail_marker, analysis_marker),
         )
 
-    if len(matches) > 1:
-        also = ", ".join(
-            f"{m.get('name')}" for m in matches[1:]
-        )
-        answer_parts.append(
-            f"\nAlso matched: {also}. Ask about one by name for details."
-        )
-
-    answer = "".join(answer_parts)
     for chunk in _chunk(answer):
         yield _sse("content", {"delta": chunk})
         await _sleep()
@@ -294,6 +473,7 @@ async def _stream_chat(
             "citations": sources,
             "primary_ipo_id": ipo_id,
             "refusal": False,
+            "llm": llm_info,
         },
     )
 
@@ -312,6 +492,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
             message=body.message,
             conversation_id=body.conversation_id,
             db_path=request.app.state.db_path,
+            llm_client=getattr(request.app.state, "llm", None),
         ),
         media_type="text/event-stream",
         headers={

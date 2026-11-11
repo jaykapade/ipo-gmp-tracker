@@ -10,10 +10,13 @@ models, for asking questions about current IPOs.
 > Scraping, SQLite persistence with numbered migrations and source provenance,
 > the 20% GMP filter, deterministic analysis, PDF reporting, optional SMTP email,
 > the read-only FastAPI service, the CLI, and the test suite work. A read-only
-> **Next.js 16 frontend** (dashboard, IPO detail, reports) now lives in
-> `frontend/`; its chat page is a placeholder and the AI layer is not implemented
-> yet. The research specification for the overview/in-depth analysis, PDF deep
-> links and provider-agnostic AI layer lives in
+> **Next.js 16 frontend** (dashboard, IPO detail, reports, chat) now lives in
+> `frontend/`, and a **provider-agnostic AI layer** (`backend/src/llm/`) is
+> implemented: Ollama / LM Studio / llama.cpp locally or OpenAI / Anthropic /
+> Gemini / OpenRouter / Groq in the cloud, selected through `LLM_*` config
+> only, with local-first defaults, explicit cloud opt-in and a deterministic
+> fallback everywhere. The research specification for the overview/in-depth
+> analysis, PDF deep links and AI narratives lives in
 > [`docs/ipo-research-framework.md`](docs/ipo-research-framework.md). See
 > [Roadmap / TODO](#roadmap--todo) for the agreed next steps.
 >
@@ -65,9 +68,9 @@ models, for asking questions about current IPOs.
 | **Email** | `src/reporting/emailer.py` sends the PDF over SMTP (TLS by default) to comma-separated `EMAIL_TO` recipients. `--dry-run` validates the message without connecting. |
 | **CLI** | `uv run python -m src.main` (run from `backend/`) exposes `scrape`, `analyze`, `report`, `run` and `serve`, with `--source`, `--min-gmp`, `--include-upcoming`, `--no-persist`, `--json`, `--email` and `--dry-run`. |
 | **Tests** | `pytest` suite covering name normalisation, number/date parsing, active-status logic, the IPO Watch mapping, DB upserts/query helpers, analysis scoring/checklists, PDF generation, email dry-runs and the CLI. |
-| **AI (local or cloud)** | Not implemented. Planned as an **optional, provider-agnostic** layer for RHP extraction, analysis narratives, entity matching and chat. One common interface selects Ollama / LM Studio / llama.cpp locally, or OpenAI / Anthropic / Gemini / any OpenAI-compatible endpoint in the cloud. Switching is config-only. Local is the default; cloud requires explicit opt-in. Must never replace deterministic filters or calculations. |
-| **Web frontend** | Implemented in `frontend/` with Next.js 16 (App Router, Cache Components), React 19, TypeScript, Tailwind 4 and Recharts. Read-only dashboard with a default 20% GMP filter, status filter, company search and API-driven column sorting, IPO detail with a GMP trend chart/history and stored analysis, and a reports page. Chat is an explicit placeholder; the Overview/In-depth split, shadcn/ui and TanStack Table are still planned. |
-| **API** | Implemented read-only FastAPI service (`uv run python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection and source provenance. `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. Chat streaming and admin scrape are still planned. |
+| **AI (local or cloud)** | Implemented in `backend/src/llm/` as an **optional, provider-agnostic** layer: one `LLMProvider` contract (`generate`, `embed`, `health`, `capabilities`), an OpenAI-compatible adapter (Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, Groq), native Anthropic and Gemini adapters, a `NullProvider` fallback, config-only switching (`LLM_*`), a fallback chain, a response cache, shared JSON-schema validation and `LLM_ALLOW_CLOUD` gating so cloud is opt-in. `LLM_ENABLED=false` (the default) keeps everything deterministic. RHP extraction, RAG, analysis narratives and the evaluation harness are still planned. |
+| **Web frontend** | Implemented in `frontend/` with Next.js 16 (App Router, Cache Components), React 19, TypeScript, Tailwind 4 and Recharts. Read-only dashboard with a default 20% GMP filter, status filter, company search and API-driven column sorting, IPO detail with a GMP trend chart/history and stored analysis, and a reports page. Chat streams grounded answers (deterministic by default, AI provider when enabled). The Overview/In-depth split, shadcn/ui and TanStack Table are still planned. |
+| **API** | Implemented read-only FastAPI service (`uv run python -m src.main serve`): IPOs, GMP history, analysis, reports, duplicate detection, source provenance and streaming chat (`POST /api/chat`). `POST /api/analyze` and `POST /api/reports` require `X-API-Token`. `GET /api/health` reports the configured AI provider's availability. Admin scrape is still planned. |
 
 ---
 
@@ -110,6 +113,17 @@ IPO Checker/
 │   │   │   ├── __init__.py
 │   │   │   ├── migrations.py      # numbered, idempotent schema migrations
 │   │   │   └── db.py              # connection, upsert, GMP history, provenance + queries
+│   │   ├── llm/
+│   │   │   ├── __init__.py        # public exports of the AI layer
+│   │   │   ├── base.py            # LLMProvider contract + shared JSON validation
+│   │   │   ├── client.py          # config-only resolution, fallback chain, cache
+│   │   │   └── providers/
+│   │   │       ├── __init__.py    # provider registry + factory (cloud gating)
+│   │   │       ├── openai_compat.py  # Ollama / LM Studio / llama.cpp / vLLM /
+│   │   │       │                    # OpenAI / OpenRouter / Groq adapter
+│   │   │       ├── anthropic.py   # native Anthropic Messages adapter
+│   │   │       ├── gemini.py      # native Gemini adapter
+│   │   │       └── null.py        # always-unavailable fallback provider
 │   │   ├── models/
 │   │   │   ├── __init__.py
 │   │   │   ├── ipo.py             # pydantic IPO model
@@ -394,12 +408,13 @@ EMAIL_SUBJECT_PREFIX=[IPO Checker]
 
 # AI (optional; local or cloud through one provider interface)
 LLM_ENABLED=false
-LLM_PROVIDER=ollama            # ollama | lmstudio | llamacpp | openai | anthropic | gemini | openai-compatible
+LLM_PROVIDER=ollama            # ollama | lmstudio | llamacpp | vllm | openai-compatible | openai | openrouter | groq | anthropic | gemini
 LLM_BASE_URL=http://localhost:11434/v1
 LLM_API_KEY=                   # required only for cloud providers
 LLM_MODEL=qwen2.5:7b-instruct
 LLM_EMBED_PROVIDER=ollama      # may differ from the chat provider
 LLM_EMBED_MODEL=nomic-embed-text
+LLM_EMBED_BASE_URL=            # defaults to the provider default (or LLM_BASE_URL)
 LLM_FALLBACK_PROVIDERS=        # optional chain, e.g. ollama,openai
 LLM_ALLOW_CLOUD=false          # explicit opt-in before documents leave the machine
 LLM_TEMPERATURE=0
@@ -455,9 +470,11 @@ These are the gaps that remain after the backend P1 hardening pass. Resolved ite
    authentication beyond the optional `X-API-Token` on mutating endpoints.
 10. **No document store.** RHP/DRHP PDFs are not fetched, parsed, chunked, or
     indexed, so there is nothing for an AI layer to cite.
-11. **No AI provider abstraction, guardrails or evaluation.** There is no common
-    local/cloud provider interface, prompt versioning, schema validation, caching,
-    citation tracking, or golden-set tests yet.
+11. **AI enrichment beyond the provider layer.** The provider abstraction,
+    cloud gating, schema validation and caching exist (`src/llm/`), but there
+    is no document store, no RAG, no persisted narrative generation, no
+    prompt-injection tests and no golden-set evaluation yet. AI outputs are
+    also not yet persisted with provider/model/prompt-version provenance.
 
 ---
 
@@ -597,8 +614,9 @@ provenance and the latest analysis), `GET /api/candidates`, `GET`/`POST /api/rep
 `GET /api/reports/{filename}`, `GET /api/quality/duplicates` and `GET /api/health`.
 `POST /api/analyze` and `POST /api/reports` are token-protected. Search and sort
 (`q`, `sort`, `order`) are implemented on `GET /api/ipos`; streaming chat is
-implemented on `POST /api/chat`; the overview/in-depth financial endpoints,
-admin scrape and AI provider health are still planned.
+implemented on `POST /api/chat`; `GET /api/health` also reports the configured
+AI provider's availability. The overview/in-depth financial endpoints and
+admin scrape are still planned.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
@@ -798,21 +816,27 @@ All AI features are **optional and non-blocking**; `LLM_ENABLED=false` must keep
 pipeline fully functional. Local and cloud providers sit behind one interface, so
 switching is config-only.
 
-- [ ] **P1 — Provider abstraction.** `backend/llm/client.py` +
-      `backend/llm/providers/` with a common `LLMProvider` contract
-      (`generate`, `embed`, `health`, `capabilities`), an OpenAI-compatible adapter
-      (Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, Groq), native
-      Anthropic/Gemini adapters where needed, timeouts, retries, and a
-      `NullProvider` fallback.
-- [ ] **P1 — Seamless provider switching.** Config-only selection
+- [x] **P1 — Provider abstraction.** Implemented in `backend/src/llm/`:
+      `base.py` defines the common `LLMProvider` contract (`generate`, `embed`,
+      `health`, `capabilities`) with shared JSON-schema validation, and
+      `providers/` ships an OpenAI-compatible adapter (Ollama, LM Studio,
+      llama.cpp, vLLM, OpenAI, OpenRouter, Groq), native Anthropic and Gemini
+      adapters, and a `NullProvider` fallback with timeouts and typed errors.
+- [x] **P1 — Seamless provider switching.** Config-only selection
       (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`,
-      `LLM_FALLBACK_PROVIDERS`), capability flags, shared prompts/schemas/cache, and
-      independent chat and embedding providers.
-- [ ] **P1 — Cloud safety.** `LLM_ALLOW_CLOUD=false` by default; explicit opt-in;
-      data minimisation and redaction; per-provider rate limits, budgets, region and
-      retention settings; audit provider/model/tokens/cost per call.
+      `LLM_FALLBACK_PROVIDERS`), capability flags, a shared response cache
+      keyed by provider/model/prompt version, and independent chat and
+      embedding providers (`LLM_EMBED_PROVIDER` / `LLM_EMBED_MODEL` /
+      `LLM_EMBED_BASE_URL`).
+- [x] **P1 — Cloud safety.** `LLM_ALLOW_CLOUD=false` by default; cloud
+      providers cannot even be constructed without the opt-in and an API
+      key; cloud fallbacks are logged, never silent; chat prompts carry only
+      a compact context (data minimisation); every response carries
+      provider/model/token usage for auditing. Per-provider rate limits,
+      budgets, region/retention policy and PII redaction remain P2.
 - [ ] **P1 — Structured extraction.** JSON-schema prompts + pydantic validation for
       RHP/DRHP fields (objects of issue, risk factors, financials, red flags).
+      The validation machinery exists (`src/llm/base.py`); RHP prompts do not.
 - [ ] **P1 — Document ingestion + RAG.** Fetch RHP PDFs, extract text with page
       numbers, chunk (≈800–1200 tokens, overlap), embed with the configured
       embedding provider (local by default), and store `documents` /
@@ -849,8 +873,9 @@ switching is config-only.
       RHP citations await the research data model.
 - [x] **P1 — Chat backend.** Whitelisted `search_ipos` tool over current IPOs +
       analysis, streaming SSE, citations, and refusal when data is missing
-      (`POST /api/chat`). Local LLM integration and RHP-chunk retrieval remain
-      planned (deterministic path is the default).
+      (`POST /api/chat`). The AI provider layer is wired in
+      (`LLM_ENABLED=true` phrases the grounded answer; failures fall back to
+      the deterministic composer). RHP-chunk retrieval remains planned.
 - [x] **P1 — Chat UI.** Streaming messages, suggested prompts, citations,
       "data as of" timestamp, stop/error handling. (Placeholder page replaced.)
 - [x] **P2 — Reports page.** List and download generated PDFs. Re-emailing remains
@@ -902,18 +927,20 @@ are opt-in. Switching is a config change, not a code change.
   - [ ] Add `APP_BASE_URL` config (default `http://localhost:3000`); never put
         secrets or API tokens in the PDF.
   - [ ] Keep the detailed per-IPO PDF as the downloadable in-depth report.
-- [ ] **P1 — Provider-agnostic AI layer.**
-  - [ ] Common interface for local and cloud providers (`generate`, `embed`,
+- [x] **P1 — Provider-agnostic AI layer.**
+  - [x] Common interface for local and cloud providers (`generate`, `embed`,
         `health`, `capabilities`); OpenAI-compatible adapter plus native
-        Anthropic/Gemini adapters where needed.
-  - [ ] Config-only switching (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`,
+        Anthropic/Gemini adapters (implemented in `backend/src/llm/`).
+  - [x] Config-only switching (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`,
         `LLM_API_KEY`, `LLM_FALLBACK_PROVIDERS`); callers never import a vendor SDK.
-  - [ ] Local-first default; `LLM_ALLOW_CLOUD=false` unless explicitly enabled;
+  - [x] Local-first default; `LLM_ALLOW_CLOUD=false` unless explicitly enabled;
         never silently send documents to a cloud provider.
   - [ ] Same prompts, JSON schemas, citation checks, caching and evaluation across
         providers; store provider/model/prompt version with every output.
-  - [ ] `LLM_ENABLED=false` falls back to deterministic templates, so the core
-        pipeline still works without a model.
+        (Shared schema validation and the response cache exist; persisted
+        provenance and the evaluation harness do not.)
+  - [x] `LLM_ENABLED=false` falls back to deterministic templates, so the core
+        pipeline still works without a model (chat does this today).
   - [ ] Five summaries (Business Quality, Financial Health, Valuation, Risk/Red
         Flags, Overall Assessment) with evidence, conclusion, confidence, missing
         information and citations.

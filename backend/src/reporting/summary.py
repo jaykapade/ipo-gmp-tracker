@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from src.models.analysis import IPOAnalysis
 from src.utils.parsing import IST
+
+if TYPE_CHECKING:
+    from src.research.digest import ResearchDigest
 
 
 def _number(value: float | None, suffix: str = "") -> str:
@@ -20,14 +25,57 @@ def _rupees(value: float | None) -> str:
     return f"Rs {value:,.2f}"
 
 
+def format_research_time(value: str | None) -> str:
+    """ISO timestamp -> '21 Nov 2026, 09:10 IST' (or the raw value)."""
+
+    if not value:
+        return "n/a"
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return moment.astimezone(IST).strftime("%d %b %Y, %H:%M IST")
+
+
+def research_headline(digest: ResearchDigest) -> str:
+    """'Watch (low confidence, 2 disputes)' or a short reason it is missing."""
+
+    if not digest.has_result:
+        return "not available"
+    parts = [f"{digest.confidence or 'unknown'} confidence"]
+    if digest.disputes:
+        parts.append(f"{digest.disputes} dispute{'s' if digest.disputes != 1 else ''}")
+    return f"{digest.verdict} ({', '.join(parts)})"
+
+
+def _research_lines(digest: ResearchDigest) -> list[str]:
+    lines = [f"   AI research: {research_headline(digest)}"]
+    if digest.has_result:
+        lines[0] += f" -- {format_research_time(digest.researched_at)}"
+        if digest.conclusion:
+            lines.append(f"   AI view: {digest.conclusion}")
+        if digest.strengths:
+            lines.append(f"   AI strength: {digest.strengths[0]}")
+        if digest.risks:
+            lines.append(f"   AI risk: {digest.risks[0]}")
+    if digest.note:
+        lines.append(f"   Note: {digest.note}")
+    return lines
+
+
 def build_text_summary(
     analyses: list[IPOAnalysis],
     *,
     min_gmp_percent: float,
     include_upcoming: bool = False,
     generated_at: datetime | None = None,
+    research: Mapping[int, ResearchDigest] | None = None,
 ) -> str:
-    """Return a readable summary suitable for a terminal or an email body."""
+    """Return a readable summary suitable for a terminal or an email body.
+
+    ``research`` adds each IPO's AI research verdict beside (never instead
+    of) the rule-based score.
+    """
 
     moment = (generated_at or datetime.now(IST)).astimezone(IST)
     lines = [
@@ -37,8 +85,13 @@ def build_text_summary(
             f"Filter: latest GMP >= {min_gmp_percent:g}%"
             f" | upcoming {'included' if include_upcoming else 'excluded'}"
         ),
-        "",
     ]
+    if research is not None:
+        lines.append(
+            "AI research: included beside the rule-based score; web facts are "
+            "unverified."
+        )
+    lines.append("")
 
     if not analyses:
         lines.append("No IPOs matched the current criteria.")
@@ -72,6 +125,9 @@ def build_text_summary(
             lines.append(f"   Strength: {analysis.strengths[0]}")
         if analysis.risks:
             lines.append(f"   Risk: {analysis.risks[0]}")
+
+        if research is not None and analysis.ipo_id in research:
+            lines.extend(_research_lines(research[analysis.ipo_id]))
 
         lines.append("")
 

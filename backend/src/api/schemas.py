@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field
 from src.models.analysis import IPOAnalysis
 
 
+class AIRoleHealth(BaseModel):
+    """Resolved provider/model and availability for one generation role."""
+
+    enabled: bool
+    provider: str
+    model: str
+    available: bool
+    detail: str
+
+
 class AIHealth(BaseModel):
     """Configured AI provider availability (never triggers a generation)."""
 
@@ -17,8 +27,10 @@ class AIHealth(BaseModel):
     model: str
     embed_provider: str
     embed_model: str
+    rerank_provider: str = "llm"
     available: bool
     detail: str
+    roles: dict[str, AIRoleHealth] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
@@ -55,6 +67,9 @@ class IPOSummary(BaseModel):
     close_date: str | None = None
     listing_date: str | None = None
     source_url: str | None = None
+
+    research_status: str | None = None
+    research_verdict: str | None = None
 
 
 class IPOPage(BaseModel):
@@ -104,6 +119,55 @@ class ReportInfo(BaseModel):
     size_bytes: int
     modified_at: str
     download_url: str
+
+
+class FacetValue(BaseModel):
+    value: str | None = None
+    count: int
+
+
+class IPOFacets(BaseModel):
+    """Filter values that actually occur in the data, with counts."""
+
+    total: int
+    statuses: list[FacetValue] = Field(default_factory=list)
+    categories: list[FacetValue] = Field(default_factory=list)
+    sectors: list[FacetValue] = Field(default_factory=list)
+    researched: int = 0
+    screen_floor: float
+
+
+class ResearchOutputOut(BaseModel):
+    id: int
+    kind: str
+    provider: str | None = None
+    model: str | None = None
+    prompt_version: str
+    confidence: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    data_left_machine: bool = False
+    created_at: str
+    output: dict[str, Any]
+    citations: list[Any] | None = None
+
+
+class ResearchRunOut(BaseModel):
+    id: int
+    ipo_id: int
+    status: str
+    stage: str | None = None
+    error: str | None = None
+    prompt_version: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    stages: list[str] = Field(default_factory=list)
+
+
+class ResearchDetail(ResearchRunOut):
+    outputs: list[ResearchOutputOut] = Field(default_factory=list)
+    latest_completed: ResearchDetail | None = None
 
 
 class DuplicatePairOut(BaseModel):

@@ -153,6 +153,7 @@ class ProviderCapabilities:
         "embeddings",
         "vision",
         "streaming",
+        "web_research",
         "context_window",
         "cost_usd_per_million_input",
         "cost_usd_per_million_output",
@@ -166,6 +167,7 @@ class ProviderCapabilities:
         embeddings: bool = False,
         vision: bool = False,
         streaming: bool = False,
+        web_research: bool = False,
         context_window: int | None = None,
         cost_usd_per_million_input: float | None = None,
         cost_usd_per_million_output: float | None = None,
@@ -175,6 +177,7 @@ class ProviderCapabilities:
         self.embeddings = embeddings
         self.vision = vision
         self.streaming = streaming
+        self.web_research = web_research
         self.context_window = context_window
         self.cost_usd_per_million_input = cost_usd_per_million_input
         self.cost_usd_per_million_output = cost_usd_per_million_output

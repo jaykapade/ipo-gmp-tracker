@@ -440,7 +440,8 @@ async def _stream_chat(
     answer: str | None = None
     llm_info: dict[str, Any] = {"used": False}
 
-    if llm_client is not None and llm_client.enabled:
+    analyst = llm_client.for_role("analyst") if llm_client is not None else None
+    if analyst is not None and analyst.enabled:
         yield _sse(
             "thinking", {"status": "composing the answer with the AI provider"}
         )
@@ -448,7 +449,7 @@ async def _stream_chat(
         context = _build_answer_context(
             primary, detail, latest, analysis, matches, data_as_of
         )
-        answer, llm_info = await _generate_answer(message, context, llm_client)
+        answer, llm_info = await _generate_answer(message, context, analyst)
 
     if answer is None:
         answer = _compose_grounded_answer(

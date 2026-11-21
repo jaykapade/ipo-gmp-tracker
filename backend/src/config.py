@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 
@@ -27,14 +28,19 @@ def setup_logging() -> None:
 
 
 def _load_dotenv() -> None:
-    """Load ``.env`` if python-dotenv is available; stay silent otherwise."""
+    """Load ``.env.local`` then ``.env`` if python-dotenv is available.
+
+    Real environment variables always win; ``.env.local`` (machine-specific,
+    gitignored) overrides ``.env`` because the first file loaded sets a key.
+    """
 
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
 
-    load_dotenv(REPO_ROOT / ".env")
+    for name in (".env.local", ".env"):
+        load_dotenv(REPO_ROOT / name)
 
 
 _load_dotenv()
@@ -114,6 +120,12 @@ DB_PATH = _env_path("IPO_DB_PATH", "data/ipo_intelligence.db")
 MIN_GMP_PERCENT = _env_float("MIN_GMP_PERCENT", 20.0)
 INCLUDE_UPCOMING = _env_bool("INCLUDE_UPCOMING", False)
 
+# --- Scheduled research -------------------------------------------------------
+
+# ``run --research`` reuses an IPO's completed AI research when it is newer
+# than this, instead of spending another run on it.
+RESEARCH_MAX_AGE_HOURS = _env_float("RESEARCH_MAX_AGE_HOURS", 24.0)
+
 # --- HTTP -------------------------------------------------------------------
 
 REQUEST_TIMEOUT = _env_float("REQUEST_TIMEOUT", 30.0)
@@ -185,6 +197,68 @@ CORS_ORIGINS = tuple(
 # Switching providers is a config change, not a code change. Local providers
 # are the default; cloud providers additionally require LLM_ALLOW_CLOUD=true
 # and LLM_API_KEY so nothing leaves the machine by accident.
+#
+# Generation roles (docs/ipo-research-framework.md §P4) can each point at a
+# different provider/model via LLM_ROLE_<ROLE>_{PROVIDER,MODEL,BASE_URL,
+# API_KEY,FALLBACKS}; unset fields inherit the global LLM_* values. The
+# embedder role maps onto the LLM_EMBED_* settings.
+#
+# The researcher role gathers cited facts from the web (claude-code only for
+# now). Its unset fields inherit the *extractor* role, not the globals.
+
+LLM_ROLES: tuple[str, ...] = (
+    "analyst",
+    "verifier",
+    "extractor",
+    "challenger",
+    "researcher",
+)
+# Optional roles stay off unless their model is configured explicitly.
+OPTIONAL_LLM_ROLES: frozenset[str] = frozenset({"challenger"})
+# Roles whose unset fields inherit another role instead of the globals.
+ROLE_PARENTS: dict[str, str] = {"researcher": "extractor"}
+# Roles that need a provider with web search/fetch tools.
+WEB_LLM_ROLES: frozenset[str] = frozenset({"researcher"})
+
+
+def _split_csv(value: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+@dataclass(frozen=True)
+class RoleOverride:
+    """Per-role overrides; ``None`` means "inherit the global setting"."""
+
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    fallback_providers: tuple[str, ...] | None = None
+
+    @classmethod
+    def from_env(cls, role: str) -> RoleOverride:
+        prefix = f"LLM_ROLE_{role.upper()}_"
+        provider = _env_optional(prefix + "PROVIDER")
+        fallbacks = _env_optional(prefix + "FALLBACKS")
+        return cls(
+            provider=provider.lower() if provider else None,
+            model=_env_optional(prefix + "MODEL"),
+            base_url=_env_optional(prefix + "BASE_URL"),
+            api_key=_env_optional(prefix + "API_KEY"),
+            fallback_providers=_split_csv(fallbacks) if fallbacks else None,
+        )
+
+    def is_empty(self) -> bool:
+        return all(
+            value is None
+            for value in (
+                self.provider,
+                self.model,
+                self.base_url,
+                self.api_key,
+                self.fallback_providers,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -205,6 +279,12 @@ class LLMSettings:
     timeout_seconds: float = 120.0
     max_context: int = 8192
     cache: bool = True
+    max_concurrency: int = 2
+    rerank_provider: str = "llm"
+    research_timeout_seconds: float = 600.0
+    research_max_turns: int = 30
+    web_research: bool = False
+    roles: Mapping[str, RoleOverride] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> LLMSettings:
@@ -216,20 +296,89 @@ class LLMSettings:
             base_url=_env_optional("LLM_BASE_URL"),
             api_key=_env("LLM_API_KEY", ""),
             model=_env("LLM_MODEL", "qwen2.5:7b-instruct"),
-            embed_provider=_env("LLM_EMBED_PROVIDER", "ollama").lower(),
-            embed_model=_env("LLM_EMBED_MODEL", "nomic-embed-text"),
-            embed_base_url=_env_optional("LLM_EMBED_BASE_URL"),
-            fallback_providers=tuple(
-                name.strip()
-                for name in _env("LLM_FALLBACK_PROVIDERS", "").split(",")
-                if name.strip()
+            embed_provider=_env(
+                "LLM_ROLE_EMBEDDER_PROVIDER", _env("LLM_EMBED_PROVIDER", "ollama")
+            ).lower(),
+            embed_model=_env(
+                "LLM_ROLE_EMBEDDER_MODEL", _env("LLM_EMBED_MODEL", "nomic-embed-text")
             ),
+            embed_base_url=_env_optional("LLM_ROLE_EMBEDDER_BASE_URL")
+            or _env_optional("LLM_EMBED_BASE_URL"),
+            fallback_providers=_split_csv(_env("LLM_FALLBACK_PROVIDERS", "")),
             allow_cloud=_env_bool("LLM_ALLOW_CLOUD", False),
             temperature=_env_float("LLM_TEMPERATURE", 0.0),
             timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 120.0),
             max_context=_env_int("LLM_MAX_CONTEXT", 8192),
             cache=_env_bool("LLM_CACHE", True),
+            max_concurrency=_env_int("LLM_MAX_CONCURRENCY", 2),
+            rerank_provider=_env("RERANK_PROVIDER", "llm").lower(),
+            research_timeout_seconds=_env_float("RESEARCH_TIMEOUT_SECONDS", 600.0),
+            research_max_turns=_env_int("RESEARCH_MAX_TURNS", 30),
+            roles={
+                role: override
+                for role in LLM_ROLES
+                if not (override := RoleOverride.from_env(role)).is_empty()
+            },
         )
+
+    def role_configured(self, role: str) -> bool:
+        """Whether ``role`` has an explicit model (required for optional roles)."""
+
+        override = self.roles.get(role)
+        return override is not None and override.model is not None
+
+    def for_role(self, role: str) -> LLMSettings:
+        """Resolve the effective settings for one generation role.
+
+        Unset role fields inherit the global values. The global base URL is
+        only inherited when the role keeps the global provider — an Ollama URL
+        is meaningless to a cloud provider (and vice versa).
+        """
+
+        if role not in LLM_ROLES:
+            raise ValueError(
+                f"unknown LLM role {role!r}; known roles: {', '.join(LLM_ROLES)}"
+            )
+        parent = ROLE_PARENTS.get(role)
+        base = self.for_role(parent) if parent else self
+        override = self.roles.get(role) or RoleOverride()
+        resolved = _apply_override(base, override)
+        if role in WEB_LLM_ROLES:
+            resolved = replace(
+                resolved,
+                web_research=True,
+                timeout_seconds=max(
+                    resolved.timeout_seconds, self.research_timeout_seconds
+                ),
+                # A cached web answer would hide fresh filings; never cache.
+                cache=False,
+            )
+        return resolved
+
+
+def _apply_override(base: LLMSettings, override: RoleOverride) -> LLMSettings:
+    """Layer one role override on top of ``base`` settings."""
+
+    provider = override.provider or base.provider
+    if override.base_url is not None:
+        base_url: str | None = override.base_url
+    elif provider == base.provider:
+        base_url = base.base_url
+    else:
+        base_url = None
+    return replace(
+        base,
+        provider=provider,
+        model=override.model or base.model,
+        base_url=base_url,
+        api_key=override.api_key or base.api_key,
+        fallback_providers=(
+            override.fallback_providers
+            if override.fallback_providers is not None
+            else base.fallback_providers
+        ),
+        roles={},
+    )
 
 
 LLM = LLMSettings.from_env()

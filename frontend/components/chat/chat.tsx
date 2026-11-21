@@ -17,6 +17,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export interface ChatProps {
   initialConversationId?: string | null;
+  /** Clickable starter questions shown before the first message. */
+  suggestions?: string[];
 }
 
 function formatTimestamp(value: string | undefined): string {
@@ -109,7 +111,7 @@ function StreamPlaceholder() {
   );
 }
 
-export function Chat({ initialConversationId }: ChatProps) {
+export function Chat({ initialConversationId, suggestions = [] }: ChatProps) {
   const [conversationId, setConversationId] = useState<string | null>(
     initialConversationId ?? null,
   );
@@ -261,12 +263,26 @@ export function Chat({ initialConversationId }: ChatProps) {
     <div className="space-y-4">
       <div className="flex-1 min-h-[300px] overflow-y-auto space-y-4 px-4 sm:px-6">
         {messages.length === 0 ? (
-          <EmptyState
-            title="No conversation yet"
-            description={
-              "Ask about an IPO by name — for example \"Tell me about Above Ltd\" — and I'll answer from the latest scraped data."
-            }
-          />
+          <div className="space-y-4 py-6">
+            <EmptyState
+              title="Ask about any tracked IPO"
+              description="Name a company and get a grounded answer from the latest scraped data, its GMP history and stored analysis."
+            />
+            {suggestions.length > 0 ? (
+              <div className="flex flex-wrap justify-center gap-2">
+                {suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => setInputValue(suggestion)}
+                    className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary hover:text-foreground"
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         ) : (
           <>
             {messages.map((message) => (
@@ -277,7 +293,7 @@ export function Chat({ initialConversationId }: ChatProps) {
         )}
       </div>
 
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      <form onSubmit={handleSubmit} className="flex gap-2 px-4 pb-4 sm:px-6">
         <input
           autoFocus
           disabled={streaming}

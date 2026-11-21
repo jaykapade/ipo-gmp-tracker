@@ -99,3 +99,14 @@ export function formatPriceBand(
 export function formatText(value: string | null | undefined): string {
   return value?.trim() ? value : "—";
 }
+
+/**
+ * Issue size in crore. Sources send either a bare number ("455.49") or an
+ * already formatted string ("₹120.10 Cr"); never double the symbol or unit.
+ */
+export function formatIssueSize(value: string | null | undefined): string {
+  const raw = value?.trim();
+  if (!raw) return "—";
+  if (/₹|cr/i.test(raw)) return raw.replace(/\bCr\b/, "cr");
+  return `₹${raw} cr`;
+}

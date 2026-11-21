@@ -285,6 +285,72 @@ def _m006_backfill_ipo_sources(connection: sqlite3.Connection) -> None:
     )
 
 
+def _m007_research(connection: sqlite3.Connection) -> None:
+    """AI research runs and their provenance-tracked outputs (framework §B2)."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS research_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            ipo_id INTEGER NOT NULL,
+
+            status TEXT NOT NULL,
+            stage TEXT,
+            error TEXT,
+            prompt_version TEXT NOT NULL,
+
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+
+            FOREIGN KEY (ipo_id)
+                REFERENCES ipos(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_research_runs_ipo_created
+        ON research_runs (ipo_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS ai_outputs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            ipo_id INTEGER NOT NULL,
+            run_id INTEGER,
+
+            kind TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            prompt_version TEXT NOT NULL,
+            input_hash TEXT,
+
+            output_json TEXT NOT NULL,
+            citations_json TEXT,
+            confidence TEXT,
+
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            data_left_machine INTEGER NOT NULL DEFAULT 0,
+
+            created_at TEXT NOT NULL,
+
+            FOREIGN KEY (ipo_id)
+                REFERENCES ipos(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (run_id)
+                REFERENCES research_runs(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_outputs_run_kind
+        ON ai_outputs (run_id, kind);
+
+        CREATE INDEX IF NOT EXISTS idx_ai_outputs_ipo_created
+        ON ai_outputs (ipo_id, created_at DESC);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _m001_initial_schema),
     Migration(2, "ipos extended columns", _m002_ipos_extended_columns),
@@ -292,6 +358,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "ipo source provenance", _m004_ipo_sources),
     Migration(5, "gmp snapshot dedupe", _m005_gmp_dedupe),
     Migration(6, "backfill ipo sources", _m006_backfill_ipo_sources),
+    Migration(7, "ai research runs and outputs", _m007_research),
 )
 
 

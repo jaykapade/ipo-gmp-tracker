@@ -9,6 +9,9 @@ Examples::
     python -m src.main report
     python -m src.main report --email --dry-run
     python -m src.main run --email
+    python -m src.main run --research --email      # the scheduled job
+    python -m src.main research 12
+    python -m src.main research --all-open
 """
 
 from __future__ import annotations
@@ -41,20 +44,63 @@ def _analysis_kwargs(args: argparse.Namespace) -> dict:
     }
 
 
-def _print_summary(run: AnalysisRun) -> None:
+def _print_summary(run: AnalysisRun, research: dict | None = None) -> None:
     print(
         build_text_summary(
             run.analyses,
             min_gmp_percent=run.min_gmp_percent,
             include_upcoming=run.include_upcoming,
             generated_at=run.generated_at,
+            research=research,
         )
+    )
+
+
+def _research_screened(args: argparse.Namespace, run: AnalysisRun) -> dict | None:
+    """With ``--research``: make sure every screened IPO has recent research.
+
+    Returns digests keyed by IPO id, or ``None`` without ``--research``.
+    AI problems never stop the report; they show up as notes in it.
+    """
+
+    if not getattr(args, "research", False):
+        return None
+
+    from src.llm import LLMClient
+    from src.research.digest import research_for_report
+
+    ipo_ids = [analysis.ipo_id for analysis in run.analyses]
+    if not ipo_ids:
+        return {}
+
+    max_age = (
+        args.research_max_age
+        if args.research_max_age is not None
+        else config.RESEARCH_MAX_AGE_HOURS
+    )
+    names = {analysis.ipo_id: analysis.name for analysis in run.analyses}
+    client = LLMClient(config.LLM)
+    if not client.for_role("analyst").enabled:
+        logger.warning(
+            "--research: AI is disabled; the report shows stored research only."
+        )
+
+    def on_event(ipo_id: int, message: str) -> None:
+        logger.info("Research #%s %s: %s", ipo_id, names.get(ipo_id, ""), message)
+
+    return research_for_report(
+        ipo_ids,
+        client=client,
+        max_age_hours=max_age,
+        db_path=args.db_path,
+        on_event=on_event,
     )
 
 
 def _report_and_maybe_email(
     args: argparse.Namespace,
     run: AnalysisRun,
+    research: dict | None = None,
 ) -> None:
     path = generate_report(
         run.analyses,
@@ -62,6 +108,7 @@ def _report_and_maybe_email(
         min_gmp_percent=run.min_gmp_percent,
         include_upcoming=run.include_upcoming,
         generated_at=run.generated_at,
+        research=research,
     )
     print(f"Report written: {path}")
 
@@ -75,6 +122,7 @@ def _report_and_maybe_email(
         min_gmp_percent=run.min_gmp_percent,
         include_upcoming=run.include_upcoming,
         generated_at=run.generated_at,
+        research=research,
     )
     result = send_email(
         subject=f"IPO report: {len(run.analyses)} candidate(s)",
@@ -121,8 +169,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
 def _cmd_report(args: argparse.Namespace) -> int:
     run = analyze_pipeline(**_analysis_kwargs(args))
-    _print_summary(run)
-    _report_and_maybe_email(args, run)
+    research = _research_screened(args, run)
+    _print_summary(run, research)
+    _report_and_maybe_email(args, run, research)
     return 0
 
 
@@ -133,10 +182,73 @@ def _cmd_run(args: argparse.Namespace) -> int:
         logger.info("%s", line)
 
     run = analyze_pipeline(**_analysis_kwargs(args))
-    _print_summary(run)
-    _report_and_maybe_email(args, run)
+    research = _research_screened(args, run)
+    _print_summary(run, research)
+    _report_and_maybe_email(args, run, research)
 
     return 1 if any(result.errors for result in results) else 0
+
+
+def _cmd_research(args: argparse.Namespace) -> int:
+    """Run AI research synchronously for one IPO or every open IPO."""
+
+    from src.database import db
+    from src.llm import LLMClient
+    from src.research import ResearchError, run_research
+
+    client = LLMClient(config.LLM)
+    if not client.for_role("analyst").enabled:
+        print("AI is disabled. Set LLM_ENABLED=true (see backend/.env.example).")
+        return 2
+
+    if args.all_open:
+        rows = db.list_ipos(status="open", limit=200, db_path=args.db_path)
+        ipo_ids = [int(row["id"]) for row in rows]
+    elif args.ipo_id is not None:
+        ipo_ids = [args.ipo_id]
+    else:
+        print("Give an IPO id or --all-open.")
+        return 2
+
+    if not ipo_ids:
+        print("No IPOs to research.")
+        return 0
+
+    failures = 0
+    for ipo_id in ipo_ids:
+        ipo = db.get_ipo(ipo_id, db_path=args.db_path)
+        if ipo is None:
+            print(f"IPO {ipo_id} not found.")
+            failures += 1
+            continue
+        print(f"\n== Researching #{ipo_id} {ipo['name']} ==")
+        try:
+            result = run_research(
+                ipo_id,
+                client=client,
+                db_path=args.db_path,
+                on_stage=lambda stage: print(f"  - {stage}", flush=True),
+            )
+        except ResearchError as exc:
+            print(f"  failed: {exc}")
+            failures += 1
+            continue
+
+        assessment = result.assessment
+        web = sum(1 for f in result.fact_pack.facts if f.source_type != "database")
+        print(
+            f"  facts: {len(result.fact_pack.facts)} ({web} from the web) · "
+            f"disputes: {len(result.disputes)}"
+        )
+        print(
+            f"  verdict: {assessment.verdict} "
+            f"(confidence {assessment.confidence.level})"
+        )
+        print(f"  {assessment.conclusion}")
+        for note in result.notes:
+            print(f"  note: {note}")
+
+    return 1 if failures else 0
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -201,6 +313,24 @@ def _add_report_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Validate and describe the email without sending it.",
     )
+    parser.add_argument(
+        "--research",
+        action="store_true",
+        help=(
+            "Run AI research for each screened IPO (reusing recent results) "
+            "and include it in the report and email. Needs LLM_ENABLED."
+        ),
+    )
+    parser.add_argument(
+        "--research-max-age",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "Reuse completed research newer than this "
+            "(default: RESEARCH_MAX_AGE_HOURS, 24). 0 always re-runs."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -258,6 +388,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_analysis_args(run)
     _add_report_args(run)
     run.set_defaults(func=_cmd_run)
+
+    research = subparsers.add_parser(
+        "research",
+        help="Run AI web research + multi-perspective review (needs LLM_ENABLED).",
+    )
+    research.add_argument(
+        "ipo_id", type=int, nargs="?", help="IPO id (see the dashboard URL)."
+    )
+    research.add_argument(
+        "--all-open",
+        action="store_true",
+        help="Research every IPO whose status is open, one after another.",
+    )
+    research.set_defaults(func=_cmd_research)
 
     serve = subparsers.add_parser(
         "serve",

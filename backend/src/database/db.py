@@ -452,6 +452,17 @@ _SCORED_IPOS_CTE = """
             ) AS row_number
         FROM gmp_history g
     ),
+    latest_research AS (
+        SELECT
+            r.id AS research_run_id,
+            r.ipo_id,
+            r.status AS research_status,
+            ROW_NUMBER() OVER (
+                PARTITION BY r.ipo_id
+                ORDER BY r.created_at DESC, r.id DESC
+            ) AS row_number
+        FROM research_runs r
+    ),
     scored AS (
         SELECT
             i.*,
@@ -475,11 +486,24 @@ _SCORED_IPOS_CTE = """
                      AND i.issue_price > 0
                     THEN 1
                 ELSE 0
-            END AS latest_gmp_percent_derived
+            END AS latest_gmp_percent_derived,
+            lr.research_run_id,
+            lr.research_status,
+            (
+                SELECT json_extract(o.output_json, '$.verdict')
+                FROM ai_outputs o
+                WHERE o.run_id = lr.research_run_id
+                  AND o.kind = 'h5'
+                ORDER BY o.id DESC
+                LIMIT 1
+            ) AS research_verdict
         FROM ipos i
         LEFT JOIN latest l
             ON l.ipo_id = i.id
            AND l.row_number = 1
+        LEFT JOIN latest_research lr
+            ON lr.ipo_id = i.id
+           AND lr.row_number = 1
     )
 """
 
@@ -495,15 +519,39 @@ _IPO_SORT_COLUMNS = {
 }
 
 
+_SME_CATEGORY = "UPPER(COALESCE(category, '')) = 'SME'"
+
+
 def _ipo_filters(
     status: str | None,
     min_gmp_percent: float | None,
     q: str | None = None,
+    category: str | None = None,
+    has_research: bool | None = None,
 ) -> tuple[str, list[Any]]:
-    """Build the optional WHERE clause shared by list/count queries."""
+    """Build the optional WHERE clause shared by list/count queries.
+
+    ``category`` accepts ``sme`` or ``mainboard`` (anything not tagged SME,
+    which the sources label ``IPO``). ``has_research`` keeps only IPOs whose
+    latest AI research run completed.
+    """
 
     conditions: list[str] = []
     parameters: list[Any] = []
+
+    if category:
+        key = category.strip().lower()
+        if key == "sme":
+            conditions.append(_SME_CATEGORY)
+        elif key in {"mainboard", "ipo"}:
+            conditions.append(f"NOT ({_SME_CATEGORY})")
+        else:
+            raise ValueError(f"Unsupported category: {category!r}")
+
+    if has_research is True:
+        conditions.append("research_status = 'done'")
+    elif has_research is False:
+        conditions.append("(research_status IS NULL OR research_status != 'done')")
 
     if status:
         conditions.append("LOWER(status) = LOWER(?)")
@@ -541,6 +589,8 @@ def list_ipos(
     status: str | None = None,
     min_gmp_percent: float | None = None,
     q: str | None = None,
+    category: str | None = None,
+    has_research: bool | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 50,
@@ -549,7 +599,10 @@ def list_ipos(
 ) -> list[dict[str, Any]]:
     """Return IPOs (with their latest GMP) for the API/dashboard."""
 
-    where, parameters = _ipo_filters(status, min_gmp_percent, q)
+    ensure_schema(db_path)
+    where, parameters = _ipo_filters(
+        status, min_gmp_percent, q, category, has_research
+    )
     query = (
         f"{_SCORED_IPOS_CTE}"
         "SELECT * FROM scored "
@@ -570,11 +623,16 @@ def count_ipos(
     status: str | None = None,
     min_gmp_percent: float | None = None,
     q: str | None = None,
+    category: str | None = None,
+    has_research: bool | None = None,
     db_path: str | Path | None = None,
 ) -> int:
     """Count IPOs matching the same filters as :func:`list_ipos`."""
 
-    where, parameters = _ipo_filters(status, min_gmp_percent, q)
+    ensure_schema(db_path)
+    where, parameters = _ipo_filters(
+        status, min_gmp_percent, q, category, has_research
+    )
     query = f"{_SCORED_IPOS_CTE}SELECT COUNT(*) AS total FROM scored {where}"
 
     with connect(db_path) as connection:
@@ -767,6 +825,299 @@ def get_latest_analysis(
         ).fetchone()
 
     return json.loads(row["payload"]) if row else None
+
+
+def get_ipo_facets(*, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Return the filter values that actually occur, with counts.
+
+    The dashboard only offers options present in the data, so it never shows
+    a status or category that cannot match anything.
+    """
+
+    ensure_schema(db_path)
+
+    def grouped(connection: sqlite3.Connection, expression: str) -> list[dict]:
+        rows = connection.execute(
+            f"""
+            SELECT {expression} AS value, COUNT(*) AS count
+            FROM ipos
+            GROUP BY 1
+            ORDER BY count DESC, value ASC
+            """
+        ).fetchall()
+        return [{"value": row["value"], "count": int(row["count"])} for row in rows]
+
+    with connect(db_path) as connection:
+        total = int(connection.execute("SELECT COUNT(*) FROM ipos").fetchone()[0])
+        statuses = grouped(connection, "LOWER(TRIM(status))")
+        categories = grouped(
+            connection,
+            f"CASE WHEN {_SME_CATEGORY} THEN 'sme' ELSE 'mainboard' END",
+        )
+        sectors = grouped(connection, "TRIM(sector)")
+        researched = int(
+            connection.execute(
+                """
+                SELECT COUNT(DISTINCT ipo_id)
+                FROM research_runs
+                WHERE status = 'done'
+                """
+            ).fetchone()[0]
+        )
+
+    return {
+        "total": total,
+        "statuses": statuses,
+        "categories": categories,
+        "sectors": sectors,
+        "researched": researched,
+    }
+
+
+# --- AI research runs and outputs -------------------------------------------
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def create_research_run(
+    ipo_id: int,
+    *,
+    prompt_version: str,
+    db_path: str | Path | None = None,
+) -> int:
+    """Insert a queued research run and return its id."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO research_runs (
+                ipo_id, status, stage, prompt_version, created_at
+            )
+            VALUES (?, 'queued', 'queued', ?, ?)
+            """,
+            (int(ipo_id), prompt_version, _now()),
+        )
+        return int(cursor.lastrowid)
+
+
+def update_research_run(
+    run_id: int,
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    error: str | None = None,
+    db_path: str | Path | None = None,
+) -> None:
+    """Advance a run's status/stage; timestamps are set automatically."""
+
+    assignments: list[str] = []
+    parameters: list[Any] = []
+    if status is not None:
+        assignments.append("status = ?")
+        parameters.append(status)
+        if status == "running":
+            assignments.append("started_at = COALESCE(started_at, ?)")
+            parameters.append(_now())
+        if status in {"done", "failed"}:
+            assignments.append("finished_at = ?")
+            parameters.append(_now())
+    if stage is not None:
+        assignments.append("stage = ?")
+        parameters.append(stage)
+    if error is not None:
+        assignments.append("error = ?")
+        parameters.append(error[:2000])
+    if not assignments:
+        return
+
+    parameters.append(int(run_id))
+    set_clause = ", ".join(assignments)
+    with connect(db_path) as connection:
+        connection.execute(
+            f"UPDATE research_runs SET {set_clause} WHERE id = ?",
+            parameters,
+        )
+
+
+def get_research_run(
+    run_id: int,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return one research run row, or ``None``."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM research_runs WHERE id = ?", (int(run_id),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_active_research_run(
+    ipo_id: int,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return the queued/running run for an IPO, if any."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM research_runs
+            WHERE ipo_id = ? AND status IN ('queued', 'running')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(ipo_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_ai_output(
+    *,
+    ipo_id: int,
+    run_id: int | None,
+    kind: str,
+    output: Any,
+    prompt_version: str,
+    provider: str | None = None,
+    model: str | None = None,
+    input_hash: str | None = None,
+    citations: Any = None,
+    confidence: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    data_left_machine: bool = False,
+    db_path: str | Path | None = None,
+) -> int:
+    """Persist one AI output with full provenance (framework section B2)."""
+
+    ensure_schema(db_path)
+    if hasattr(output, "model_dump"):
+        output = output.model_dump(mode="json")
+    with connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_outputs (
+                ipo_id, run_id, kind, provider, model, prompt_version,
+                input_hash, output_json, citations_json, confidence,
+                input_tokens, output_tokens, data_left_machine, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(ipo_id),
+                run_id,
+                kind,
+                provider,
+                model,
+                prompt_version,
+                input_hash,
+                json.dumps(output, default=str),
+                json.dumps(citations, default=str) if citations is not None else None,
+                confidence,
+                input_tokens,
+                output_tokens,
+                1 if data_left_machine else 0,
+                _now(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def _output_row(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["output"] = json.loads(item.pop("output_json"))
+    citations = item.pop("citations_json")
+    item["citations"] = json.loads(citations) if citations else None
+    item["data_left_machine"] = bool(item["data_left_machine"])
+    return item
+
+
+def get_research_outputs(
+    run_id: int,
+    *,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return every output of one run, oldest first."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM ai_outputs WHERE run_id = ? ORDER BY id ASC",
+            (int(run_id),),
+        ).fetchall()
+    return [_output_row(row) for row in rows]
+
+
+def get_latest_research(
+    ipo_id: int,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return the newest run for an IPO with its outputs.
+
+    A run in progress is returned as-is (with whatever outputs exist so far)
+    so the UI can show live progress; ``latest_completed`` holds the newest
+    finished run so results stay visible while a re-run is underway.
+    """
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM research_runs
+            WHERE ipo_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(ipo_id),),
+        ).fetchone()
+        done = connection.execute(
+            """
+            SELECT * FROM research_runs
+            WHERE ipo_id = ? AND status = 'done'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(ipo_id),),
+        ).fetchone()
+    if row is None:
+        return None
+
+    run = dict(row)
+    run["outputs"] = get_research_outputs(run["id"], db_path=db_path)
+    if done is not None and done["id"] != run["id"]:
+        completed = dict(done)
+        completed["outputs"] = get_research_outputs(completed["id"], db_path=db_path)
+        completed["latest_completed"] = None
+        run["latest_completed"] = completed
+    else:
+        run["latest_completed"] = None
+    return run
+
+
+def mark_stale_research_runs_failed(*, db_path: str | Path | None = None) -> int:
+    """Fail runs left queued/running by a previous process (e.g. a restart)."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE research_runs
+            SET status = 'failed',
+                error = COALESCE(error, 'interrupted: the API process restarted'),
+                finished_at = ?
+            WHERE status IN ('queued', 'running')
+            """,
+            (_now(),),
+        )
+        return int(cursor.rowcount)
 
 
 if __name__ == "__main__":

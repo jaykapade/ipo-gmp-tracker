@@ -700,6 +700,27 @@ Each summary must contain:
 - What would change the view.
 - Explicitly not investment advice; show data timestamps.
 
+### H6. Interim evidence: web research
+
+Until the Phase 2 document pipeline exists, the evidence pack is built by a
+**researcher** role (web-enabled `claude-code`; unset fields inherit the
+extractor role) instead of RHP extraction:
+
+- The researcher searches and reads pages, preferring the RHP/DRHP, SEBI and
+  the company/registrar, then NSE/BSE, then reputable media and aggregators
+  (§D1), and returns schema-validated facts with a URL and a source type
+  (`official`, `exchange`, `secondary`). Conflicting figures are kept as
+  separate facts; missing items are listed as gaps.
+- The pipeline assigns fact ids (`W1…`) and adds this app's own data as
+  `database` facts (`D1…`), so the model never invents ids.
+- Perspectives cite fact ids; a citation gate drops evidence whose ids do not
+  exist. Points resting only on `secondary` facts must say so.
+- Web facts are **unverified**. When Phase 2 lands, the same perspectives run
+  over page-cited RHP extraction, and web facts become corroboration.
+- Implementation: `backend/src/research/` (prompt version `research-v1`);
+  outputs in `research_runs` and `ai_outputs` with provider, model, input
+  hash, tokens and `data_left_machine`.
+
 ---
 
 ## I. Detailed PDF report structure
@@ -981,15 +1002,20 @@ is complete, the rest are pending. Items are checked off here as they ship.
 
 ### Phase 1 — Role routing and reranking
 
-- [ ] Per-role config keys `LLM_ROLE_<ROLE>_MODEL` for analyst, verifier,
-      extractor, challenger and embedder, with the §P defaults; optional
-      per-role provider/base-URL/key overrides.
-- [ ] `LLMClient.for_role(role)`; the challenger lazy-loads with
-      `keep_alive=0` and is skipped gracefully when its model is absent.
-- [ ] `RerankProvider` with the three §P3 backends; default `ollama-llm`.
-- [ ] Per-role availability in `/api/health`; offline tests for routing,
+- [x] Per-role config keys `LLM_ROLE_<ROLE>_MODEL` for analyst, verifier,
+      extractor, challenger and embedder; optional per-role
+      provider/base-URL/key/fallback overrides.
+- [x] `LLMClient.for_role(role)`; the challenger is skipped gracefully until
+      its model is configured. (Ollama `keep_alive=0` lazy-loading is still
+      open.)
+- [ ] `RerankProvider` with the three §P3 backends — the contract and the
+      `llm` backend (alias `ollama-llm`, provider-agnostic) are done;
+      `fastembed` and `llamacpp` are still open.
+- [x] Per-role availability in `/api/health`; offline tests for routing,
       fallback and reranking.
-- [ ] `.env.example` and README updated with the role contract.
+- [x] `.env.example` and README updated with the role contract.
+- [x] `claude-code` provider: the same roles on a Claude subscription
+      ([§P6](#p6-claude-profile)).
 
 ### Phase 2 — Document pipeline and storage
 
@@ -1017,11 +1043,16 @@ is complete, the rest are pending. Items are checked off here as they ship.
 
 - [ ] Model 3 extraction: schema-validated JSON with page citations and
       quote verification (§E3); prompt-injection defence.
-- [ ] Research findings: promoters and management, litigation, related
-      parties, governance, peers and industry context.
-- [ ] Five isolated analyst perspectives (§H0) on `qwen3.5:9b-q4_K_M`.
-- [ ] Verifier challenge pass on `gemma4:12b`; dispute log.
-- [ ] Optional challenger for unresolved disputes.
+- [x] Interim evidence path: web research by the researcher role with
+      per-fact URLs and source types ([§H6](#h6-interim-evidence-web-research)).
+- [x] Research findings: promoters and management, litigation, related
+      parties, governance, peers and industry context — gathered from the
+      web for now; to be confirmed against the RHP once Phase 2 lands.
+- [x] Five isolated analyst perspectives (§H0): H1–H4 isolated, H5
+      synthesis beside the deterministic score; citation gate
+      (`backend/src/research/`).
+- [x] Verifier challenge pass; dispute log stored in `ai_outputs`.
+- [x] Optional challenger for unresolved disputes (skipped until configured).
 - [ ] Review queue for low-confidence or conflicting extractions.
 
 ### Phase 5 — Reports
@@ -1131,6 +1162,7 @@ LLM_ROLE_VERIFIER_MODEL=gemma4:12b
 LLM_ROLE_EXTRACTOR_MODEL=qwen3.5:4b-q4_K_M
 LLM_ROLE_CHALLENGER_MODEL=gpt-oss:20b      # absent model = graceful skip
 LLM_ROLE_EMBEDDER_MODEL=qwen3-embedding:0.6b
+# LLM_ROLE_RESEARCHER_*                    # web research; inherits the extractor
 RERANK_PROVIDER=ollama-llm                 # ollama-llm | fastembed | llamacpp
 ```
 
@@ -1166,6 +1198,37 @@ Hard rules, unchanged: local-first by default; `LLM_ALLOW_CLOUD=false` unless
 explicitly enabled; no silent fallback from local to cloud; every output
 records provider, model and prompt version (`ai_outputs`).
 
+### P6. Claude profile
+
+The same six roles on Claude, for personal use on a Claude Pro/Max
+subscription (`LLM_PROVIDER=claude-code`, through the headless `claude` CLI)
+or for commercial use on the API (`LLM_PROVIDER=anthropic` + `LLM_API_KEY`).
+The model ids are identical in both modes, so switching is config-only.
+
+| Role | Local model (§P1) | Claude equivalent | Reasoning |
+| --- | --- | --- | --- |
+| Analyst | `qwen3.5:9b-q4_K_M` | `claude-sonnet-5-5` | the capable workhorse slot |
+| Verifier | `gemma4:12b` | `claude-opus-5-5` | locally, independence comes from a different model family; on Claude it comes from a stronger tier plus an isolated context |
+| Extractor | `qwen3.5:4b-q4_K_M` | `claude-haiku-5-5` | small, fast, schema-bound (`--json-schema`) |
+| Challenger | `gpt-oss:20b` | `claude-opus-5-5` | strongest tier, disputes only, so it rarely spends quota |
+| Embedder | `qwen3-embedding:0.6b` | stays local | Claude offers no embeddings; local is free and private (Voyage AI is the API-mode option later) |
+| Reranker | `ollama-llm` | `llm` → extractor (Haiku) | the same 0–10 JSON scoring prompt on another provider |
+
+Document parsing (Docling / MinerU / OCR) stays local and deterministic.
+
+Subscription-mode rules:
+
+- Personal use only. A multi-user or commercial deployment must use the API
+  path. The provider logs this once at startup.
+- `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are stripped from the CLI's
+  environment so calls are never silently API-billed. `/api/health` shows
+  whether the login is a `claude.ai` subscription.
+- `LLM_MAX_CONCURRENCY` (default 2) caps parallel CLI calls. The five analyst
+  perspectives queue behind it rather than hitting plan rate limits.
+- A local fallback can pin its own model, e.g.
+  `LLM_FALLBACK_PROVIDERS=ollama=qwen3.5:9b-q4_K_M`. The fallback is logged,
+  like every hop.
+
 ---
 
 ## Appendix: current gaps vs this specification
@@ -1173,11 +1236,12 @@ records provider, model and prompt version (`ai_outputs`).
 | Area | Current state | Needed |
 | --- | --- | --- |
 | Financial statements | Not stored | Periodised facts + ratios (Phase 3) |
-| Source citations | GMP/source provenance only | Per-fact document/page citations (Phase 2) |
-| RHP extraction | Not implemented | Ingestion + extraction + citations (Phases 2 and 4) |
-| Overview/in-depth app | No frontend | Tabs + API endpoints (Phase 3) |
+| Source citations | Per-fact URLs for web research (§H6); no page citations | Per-fact document/page citations (Phase 2) |
+| RHP extraction | Not implemented; web research is the interim evidence path | Ingestion + extraction + citations (Phases 2 and 4) |
+| Overview/in-depth app | Detail page with Overview and AI research tabs | In-depth financial tab (Phase 3) |
 | PDF deep links | Not implemented | Base URL config + QR codes (Phase 5) |
-| AI provider | Implemented and committed (`backend/src/llm/`) | Role routing (Phase 1), five-perspective summaries (Phase 4) |
-| Local models | Pulled and GPU-verified (§P) | Role routing and orchestration (Phases 1 and 4) |
+| AI provider | Implemented (`backend/src/llm/`), including role routing, the `llm` reranker and the `claude-code` subscription provider | `fastembed`/`llamacpp` rerankers (Phase 1) |
+| AI research | H1–H5, verifier, dispute log and challenger implemented over web evidence (§H6) | RHP-grounded evidence (Phase 2), review queue, evaluation set |
+| Local models | Pulled and GPU-verified (§P); usable for every role except web research | Ollama `keep_alive=0` challenger loading |
 | Post-listing tracking | Not implemented | Price/outcome tables + calibration (beyond Phase 5) |
 | SME module | Checklist only | Dedicated scoring + report block |

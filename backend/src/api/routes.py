@@ -18,16 +18,21 @@ from src.api.schemas import (
     GMPPoint,
     HealthResponse,
     IPODetail,
+    IPOFacets,
     IPOPage,
     IPOSourceOut,
     IPOSummary,
     ReportInfo,
+    ResearchDetail,
+    ResearchRunOut,
 )
 from src.database import db
 from src.llm import LLMClient
 from src.models.analysis import IPOAnalysis
 from src.pipeline import analyze_pipeline
 from src.reporting import generate_report
+from src.research import STAGES as RESEARCH_STAGES
+from src.research import ResearchJobs
 from src.utils.dedupe import find_duplicate_pairs
 
 router = APIRouter(prefix="/api")
@@ -80,6 +85,23 @@ def _summary_from_scored_row(row: dict[str, Any]) -> IPOSummary:
         close_date=row.get("close_date"),
         listing_date=row.get("listing_date"),
         source_url=row.get("source_url"),
+        research_status=row.get("research_status"),
+        research_verdict=row.get("research_verdict"),
+    )
+
+
+def _run_out(run: dict[str, Any]) -> ResearchRunOut:
+    fields = {key: run.get(key) for key in ResearchRunOut.model_fields}
+    fields["stages"] = list(RESEARCH_STAGES)
+    return ResearchRunOut(**fields)
+
+
+def _research_detail(run: dict[str, Any]) -> ResearchDetail:
+    completed = run.get("latest_completed")
+    return ResearchDetail(
+        **_run_out(run).model_dump(),
+        outputs=run.get("outputs") or [],
+        latest_completed=_research_detail(completed) if completed else None,
     )
 
 
@@ -165,6 +187,8 @@ def list_ipos(
     status: str | None = Query(default=None),
     min_gmp: float | None = Query(default=None, ge=0),
     q: str | None = Query(default=None, max_length=100),
+    category: Literal["mainboard", "sme"] | None = Query(default=None),
+    has_research: bool | None = Query(default=None),
     sort: Literal[
         "name",
         "gmp_percent",
@@ -180,6 +204,8 @@ def list_ipos(
         status=status,
         min_gmp_percent=min_gmp,
         q=q,
+        category=category,
+        has_research=has_research,
         sort=sort,
         order=order,
         limit=limit,
@@ -190,6 +216,8 @@ def list_ipos(
         status=status,
         min_gmp_percent=min_gmp,
         q=q,
+        category=category,
+        has_research=has_research,
         db_path=_db_path(request),
     )
 
@@ -198,6 +226,16 @@ def list_ipos(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/ipos/facets", response_model=IPOFacets, tags=["ipos"])
+def ipo_facets(request: Request) -> IPOFacets:
+    """Filter options that exist in the data (drives the dashboard filters)."""
+
+    return IPOFacets(
+        **db.get_ipo_facets(db_path=_db_path(request)),
+        screen_floor=config.MIN_GMP_PERCENT,
     )
 
 
@@ -214,6 +252,15 @@ def get_ipo(request: Request, ipo_id: int) -> IPODetail:
     )
     latest = history[0] if history else None
     summary = _summary_from_ipo_row(row, latest)
+    research = db.get_latest_research(ipo_id, db_path=_db_path(request))
+    if research is not None:
+        summary.research_status = research["status"]
+        done = research if research["status"] == "done" else research.get(
+            "latest_completed"
+        )
+        if done:
+            h5 = next((o for o in done["outputs"] if o["kind"] == "h5"), None)
+            summary.research_verdict = h5["output"].get("verdict") if h5 else None
 
     return IPODetail(
         **summary.model_dump(),
@@ -239,6 +286,55 @@ def get_ipo(request: Request, ipo_id: int) -> IPODetail:
             db_path=_db_path(request),
         ),
     )
+
+
+@router.post(
+    "/ipos/{ipo_id}/research",
+    response_model=ResearchRunOut,
+    status_code=202,
+    dependencies=[Depends(require_token)],
+    tags=["research"],
+)
+def start_research(request: Request, ipo_id: int) -> ResearchRunOut:
+    """Queue an AI research run (web facts, H1-H5, verifier, disputes)."""
+
+    if db.get_ipo(ipo_id, db_path=_db_path(request)) is None:
+        raise HTTPException(status_code=404, detail="IPO not found")
+    llm_client: LLMClient = request.app.state.llm
+    if not llm_client.for_role("analyst").enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="AI is disabled; set LLM_ENABLED=true (see backend/.env.example).",
+        )
+    jobs: ResearchJobs = request.app.state.research
+    run, _created = jobs.submit(ipo_id)
+    return _run_out(run)
+
+
+@router.get(
+    "/ipos/{ipo_id}/research",
+    response_model=ResearchDetail | None,
+    tags=["research"],
+)
+def latest_research(request: Request, ipo_id: int) -> ResearchDetail | None:
+    """Newest research run with its outputs (null when never researched)."""
+
+    if db.get_ipo(ipo_id, db_path=_db_path(request)) is None:
+        raise HTTPException(status_code=404, detail="IPO not found")
+    run = db.get_latest_research(ipo_id, db_path=_db_path(request))
+    return _research_detail(run) if run else None
+
+
+@router.get(
+    "/research/runs/{run_id}",
+    response_model=ResearchRunOut,
+    tags=["research"],
+)
+def research_run(request: Request, run_id: int) -> ResearchRunOut:
+    run = db.get_research_run(run_id, db_path=_db_path(request))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return _run_out(run)
 
 
 @router.get(

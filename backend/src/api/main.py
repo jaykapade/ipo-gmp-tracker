@@ -12,6 +12,9 @@ require the ``X-API-Token`` header when ``API_TOKEN`` is configured.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -21,7 +24,20 @@ from src import config
 from src.api.chat import router as chat_router
 from src.api.routes import router
 from src.config import LLMSettings
+from src.database import db
 from src.llm import LLMClient
+from src.research import ResearchJobs
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    stale = db.mark_stale_research_runs_failed(db_path=app.state.db_path)
+    if stale:
+        logger.warning("Marked %d interrupted research run(s) as failed", stale)
+    yield
+    app.state.research.shutdown()
 
 
 def create_app(
@@ -41,6 +57,7 @@ def create_app(
             "Read-only access to scraped IPOs, deterministic analysis and "
             "generated PDF reports. Mutating endpoints require X-API-Token."
         ),
+        lifespan=_lifespan,
     )
 
     app.state.db_path = db_path
@@ -53,6 +70,7 @@ def create_app(
     app.state.llm = LLMClient(
         llm_settings if llm_settings is not None else config.LLM
     )
+    app.state.research = ResearchJobs(app.state.llm, db_path=db_path)
 
     app.add_middleware(
         CORSMiddleware,

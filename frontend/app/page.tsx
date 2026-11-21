@@ -14,14 +14,17 @@ export default function DashboardPage(props: PageProps<"/">) {
   return (
     <div className="space-y-7">
       <PageHeader
-        eyebrow="Live shortlist"
+        eyebrow="Live tracker"
         title="IPO dashboard"
         description={
           <>
-            Active Indian IPOs whose latest grey-market premium meets the{" "}
-            <strong className="font-semibold text-foreground">20% minimum</strong>{" "}
-            screen. Scores, verdicts and reports stay deterministic — no model is
-            involved in filtering.
+            Every IPO currently tracked, with its latest grey-market premium.
+            Filter by board, GMP threshold or research status; open an IPO to
+            see its history, the rule-based score and{" "}
+            <strong className="font-semibold text-foreground">
+              AI research
+            </strong>
+            . Filtering and scoring never involve a model.
           </>
         }
       />

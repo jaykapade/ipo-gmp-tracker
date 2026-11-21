@@ -37,6 +37,13 @@ from src.llm.providers import (
     create_provider,
     is_cloud_provider,
 )
+from src.llm.rerank import (
+    IdentityReranker,
+    LLMReranker,
+    RankedPassage,
+    RerankProvider,
+    create_reranker,
+)
 
 __all__ = [
     "CloudDisabledError",
@@ -48,15 +55,20 @@ __all__ = [
     "LLMResponse",
     "LLMResponseValidationError",
     "NullProvider",
+    "IdentityReranker",
+    "LLMReranker",
     "PROVIDER_SPECS",
     "ProviderCapabilities",
     "ProviderHealth",
     "ProviderNotConfiguredError",
     "ProviderUnavailableError",
+    "RankedPassage",
+    "RerankProvider",
     "Role",
     "TokenUsage",
     "UnknownProviderError",
     "create_provider",
+    "create_reranker",
     "extract_json_object",
     "get_client",
     "is_cloud_provider",

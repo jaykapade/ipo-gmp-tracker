@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Suspense } from "react";
 
+import { AiStatus } from "@/components/shell/ai-status";
 import { SiteNav, SiteNavFallback } from "@/components/shell/site-nav";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -22,9 +23,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </Link>
 
-          <Suspense fallback={<SiteNavFallback />}>
-            <SiteNav />
-          </Suspense>
+          <div className="flex items-center gap-3">
+            <AiStatus />
+            <Suspense fallback={<SiteNavFallback />}>
+              <SiteNav />
+            </Suspense>
+          </div>
         </div>
       </header>
 
@@ -43,8 +47,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             . Always verify with the official RHP and NSE/BSE filings.
           </p>
           <p>
-            Deterministic filters and scoring only · AI enrichment is optional
-            and off by default.
+            Filters and scores are rule-based. AI research is optional, cites
+            its sources and is shown beside — never instead of — the
+            deterministic score.
           </p>
         </div>
       </footer>

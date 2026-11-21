@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { ApiUnavailable } from "@/components/dashboard/api-unavailable";
+import { ResearchBadge } from "@/components/dashboard/ipo-table";
+import { ResearchPanel } from "@/components/research/research-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { Badge, statusTone, verdictTone } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -11,13 +13,15 @@ import {
   formatCurrency,
   formatDate,
   formatDateTime,
+  formatIssueSize,
   formatMultiple,
   formatNumber,
   formatPercent,
   formatPriceBand,
   formatText,
 } from "@/lib/format";
-import type { IPODetail } from "@/lib/types";
+import type { IPODetail, ResearchDetail } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 import { AnalysisPanel } from "./analysis-panel";
 import { GmpChart } from "./gmp-chart";
@@ -137,12 +141,63 @@ function Sources({ ipo }: { ipo: IPODetail }) {
   );
 }
 
+type Tab = "overview" | "research";
+
+function Tabs({ id, active }: { id: number; active: Tab }) {
+  const tabs: { key: Tab; label: string; href: string }[] = [
+    { key: "overview", label: "Overview", href: `/ipos/${id}` },
+    { key: "research", label: "AI research", href: `/ipos/${id}?tab=research` },
+  ];
+  return (
+    <nav aria-label="IPO sections" className="flex gap-1 border-b border-border">
+      {tabs.map((tab) => (
+        <Link
+          key={tab.key}
+          href={tab.href}
+          scroll={false}
+          aria-current={tab.key === active ? "page" : undefined}
+          className={cn(
+            "-mb-px border-b-2 px-3 py-2.5 text-sm font-medium transition-colors",
+            tab.key === active
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {tab.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+async function ResearchTab({ ipo }: { ipo: IPODetail }) {
+  const [research, health] = await Promise.all([
+    api.getResearch(ipo.id).catch((): ResearchDetail | null => null),
+    api.health().catch(() => null),
+  ]);
+  const analysis = ipo.latest_analysis;
+
+  return (
+    <ResearchPanel
+      ipoId={ipo.id}
+      initial={research}
+      aiEnabled={Boolean(health?.ai.enabled)}
+      deterministic={
+        analysis ? { score: analysis.score, verdict: analysis.verdict } : null
+      }
+    />
+  );
+}
+
 export async function IpoDetailContent({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const tab: Tab = (await searchParams).tab === "research" ? "research" : "overview";
 
   let ipo: IPODetail;
   try {
@@ -186,12 +241,20 @@ export async function IpoDetailContent({
             </Badge>
             {analysis ? (
               <Badge tone={verdictTone(analysis.verdict)}>
-                {analysis.verdict} · {analysis.score.toFixed(1)}
+                Score {analysis.verdict} · {analysis.score.toFixed(1)}
               </Badge>
             ) : null}
+            <ResearchBadge ipo={ipo} />
           </>
         }
       />
+
+      <Tabs id={ipo.id} active={tab} />
+
+      {tab === "research" ? (
+        <ResearchTab ipo={ipo} />
+      ) : (
+      <>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat
@@ -222,7 +285,7 @@ export async function IpoDetailContent({
         />
         <Stat
           label="Issue size"
-          value={ipo.ipo_size_cr ? `₹${ipo.ipo_size_cr} cr` : "—"}
+          value={formatIssueSize(ipo.ipo_size_cr)}
           hint={ipo.lot_size ?? "Lot size not stored"}
         />
         <Stat
@@ -253,6 +316,8 @@ export async function IpoDetailContent({
           <Sources ipo={ipo} />
         </div>
       </div>
+      </>
+      )}
 
       <p className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-xs leading-5 text-muted-foreground">
         <strong className="font-semibold text-warning">

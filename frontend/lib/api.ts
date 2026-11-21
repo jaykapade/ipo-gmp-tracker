@@ -10,8 +10,10 @@
 import type {
   HealthResponse,
   IPODetail,
+  IPOFacets,
   IPOPage,
   ReportInfo,
+  ResearchDetail,
 } from "@/lib/types";
 
 const configuredBaseUrl =
@@ -94,10 +96,14 @@ export const API_SORT_LABEL: Record<IpoSortField, string> = {
   updated_at: "latest GMP update",
 };
 
+export type CategoryFilter = "mainboard" | "sme";
+
 export interface ListIposOptions {
   status?: string | null;
   minGmpPercent?: number | null;
   q?: string | null;
+  category?: CategoryFilter | null;
+  hasResearch?: boolean | null;
   sort?: IpoSortField;
   order?: SortOrder;
   limit?: number;
@@ -115,6 +121,8 @@ export const api = {
       status,
       minGmpPercent,
       q,
+      category,
+      hasResearch,
       sort = "name",
       order = "asc",
       limit = 100,
@@ -126,12 +134,24 @@ export const api = {
       params.set("min_gmp", String(minGmpPercent));
     }
     if (q?.trim()) params.set("q", q.trim());
+    if (category) params.set("category", category);
+    if (hasResearch != null) params.set("has_research", String(hasResearch));
     params.set("sort", sort);
     params.set("order", order);
     params.set("limit", String(limit));
     params.set("offset", String(offset));
 
     return apiFetch<IPOPage>(`/api/ipos?${params.toString()}`);
+  },
+
+  facets(): Promise<IPOFacets> {
+    return apiFetch<IPOFacets>("/api/ipos/facets");
+  },
+
+  getResearch(id: number | string): Promise<ResearchDetail | null> {
+    return apiFetch<ResearchDetail | null>(
+      `/api/ipos/${encodeURIComponent(String(id))}/research`,
+    );
   },
 
   getIpo(id: number | string): Promise<IPODetail> {

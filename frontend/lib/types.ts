@@ -32,6 +32,8 @@ export interface IPOSummary {
   close_date: string | null;
   listing_date: string | null;
   source_url: string | null;
+  research_status: ResearchStatus | null;
+  research_verdict: Verdict | null;
 }
 
 export interface IPOPage {
@@ -108,10 +110,139 @@ export interface ReportInfo {
   download_url: string;
 }
 
+export interface AIRoleHealth {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  available: boolean;
+  detail: string;
+}
+
+export interface AIHealth extends AIRoleHealth {
+  embed_provider: string;
+  embed_model: string;
+  rerank_provider: string;
+  roles: Record<string, AIRoleHealth>;
+}
+
 export interface HealthResponse {
   status: string;
   database: string;
   generated_at: string;
+  ai: AIHealth;
+}
+
+// --- Dashboard facets --------------------------------------------------------
+
+export interface FacetValue {
+  value: string | null;
+  count: number;
+}
+
+export interface IPOFacets {
+  total: number;
+  statuses: FacetValue[];
+  categories: FacetValue[];
+  sectors: FacetValue[];
+  researched: number;
+  screen_floor: number;
+}
+
+// --- AI research (mirrors backend/src/research/schemas.py) -------------------
+
+export type ResearchStatus = "queued" | "running" | "done" | "failed";
+export type ConfidenceLevel = "high" | "medium" | "low";
+export type SourceType = "official" | "exchange" | "secondary" | "database";
+export type PerspectiveKey = "h1" | "h2" | "h3" | "h4";
+
+export interface Fact {
+  id: string;
+  category: string;
+  claim: string;
+  value: string | null;
+  period: string | null;
+  source_url: string | null;
+  source_title: string | null;
+  source_type: SourceType;
+  as_of: string | null;
+}
+
+export interface FactPack {
+  ipo_id: number;
+  ipo_name: string;
+  facts: Fact[];
+  gaps: string[];
+  rhp_url: string | null;
+  gathered_at: string;
+}
+
+export interface Confidence {
+  level: ConfidenceLevel;
+  reason: string;
+}
+
+export interface PerspectiveRecord {
+  key: PerspectiveKey;
+  title: string;
+  evidence: { point: string; fact_ids: string[] }[];
+  conclusion: string;
+  confidence: Confidence;
+  missing_information: string[];
+  dropped_evidence: string[];
+  error: string | null;
+}
+
+export interface Dispute {
+  finding_id: string;
+  perspective: PerspectiveKey;
+  finding: string;
+  stance: "disagree" | "unsupported";
+  verifier_reason: string;
+  ruling: "uphold_finding" | "uphold_verifier" | "unresolved";
+  ruling_reason: string | null;
+}
+
+export interface Assessment {
+  verdict: Verdict;
+  conclusion: string;
+  strengths: string[];
+  risks: string[];
+  what_would_change: string[];
+  confidence: Confidence;
+  notes?: string[];
+}
+
+export interface ResearchOutput {
+  id: number;
+  kind: string;
+  provider: string | null;
+  model: string | null;
+  prompt_version: string;
+  confidence: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  data_left_machine: boolean;
+  created_at: string;
+  output: Record<string, unknown>;
+  citations: unknown[] | null;
+}
+
+export interface ResearchRun {
+  id: number;
+  ipo_id: number;
+  status: ResearchStatus;
+  stage: string | null;
+  error: string | null;
+  prompt_version: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  stages: string[];
+}
+
+export interface ResearchDetail extends ResearchRun {
+  outputs: ResearchOutput[];
+  latest_completed: ResearchDetail | null;
 }
 
 /** One chat message rendered in the conversation list. */

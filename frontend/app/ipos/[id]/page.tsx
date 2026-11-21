@@ -47,7 +47,10 @@ function DetailSkeleton() {
 export default function IpoDetailPage(props: PageProps<"/ipos/[id]">) {
   return (
     <Suspense fallback={<DetailSkeleton />}>
-      <IpoDetailContent params={props.params} />
+      <IpoDetailContent
+        params={props.params}
+        searchParams={props.searchParams}
+      />
     </Suspense>
   );
 }

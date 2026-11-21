@@ -987,8 +987,11 @@ Categories the first draft may have under-weighted:
 
 ## O. Implementation roadmap
 
-Six phases; each lands independently with tests, lint and a commit. Phase 0
-is complete, the rest are pending. Items are checked off here as they ship.
+Six phases; each lands independently with tests, lint and a commit. Items
+are checked off here as they ship. Status: Phase 0 done; Phase 1 done except
+the `fastembed`/`llamacpp` rerankers and challenger lazy-loading; Phase 4
+done over web evidence (RHP extraction waits on Phase 2); Phases 2, 3 and 5
+not started; daily scheduled runs have shipped.
 
 ### Phase 0 — Foundation (done)
 
@@ -1067,8 +1070,10 @@ is complete, the rest are pending. Items are checked off here as they ship.
       matching and an alias table.
 - [ ] Evaluation harness with a golden set of RHP questions;
       prompt-injection tests.
-- [ ] Scheduled research runs and health alerts; retention policy
-      and audit trail.
+- [x] Scheduled runs: `run --research --email` reuses fresh research
+      (`RESEARCH_MAX_AGE_HOURS`), puts AI verdicts in the PDF and email, and
+      runs daily through `backend/scripts/scheduled-run.ps1` (Task Scheduler).
+- [ ] Scraper/run health alerts; retention policy and audit trail.
 - [ ] Post-listing price tracking and backtesting of scoring weights against
       listing outcomes.
 
@@ -1243,5 +1248,6 @@ Subscription-mode rules:
 | AI provider | Implemented (`backend/src/llm/`), including role routing, the `llm` reranker and the `claude-code` subscription provider | `fastembed`/`llamacpp` rerankers (Phase 1) |
 | AI research | H1–H5, verifier, dispute log and challenger implemented over web evidence (§H6) | RHP-grounded evidence (Phase 2), review queue, evaluation set |
 | Local models | Pulled and GPU-verified (§P); usable for every role except web research | Ollama `keep_alive=0` challenger loading |
+| Automation | Daily scheduled scrape → analyse → research → PDF → email (`scheduled-run.ps1`) | Health alerts, retention, email delivery log |
 | Post-listing tracking | Not implemented | Price/outcome tables + calibration (beyond Phase 5) |
 | SME module | Checklist only | Dedicated scoring + report block |

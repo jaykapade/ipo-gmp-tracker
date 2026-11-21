@@ -153,6 +153,12 @@ INVESTORGAIN_URL = _env(
     f"{INVESTORGAIN_FISCAL_YEAR}/0/all?search=&v=19-49",
 )
 
+# Public page behind the InvestorGain API, linked as a source in reports.
+INVESTORGAIN_PAGE_URL = _env(
+    "INVESTORGAIN_PAGE_URL",
+    f"https://www.investorgain.com/report/live-ipo-gmp/{INVESTORGAIN_REPORT_ID}/",
+)
+
 IPOWATCH_URL = _env(
     "IPOWATCH_URL",
     "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/",
@@ -176,6 +182,9 @@ SMTP_PASSWORD = _env("SMTP_PASSWORD", "")
 EMAIL_FROM = _env("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = _env("EMAIL_TO", "")
 EMAIL_SUBJECT_PREFIX = _env("EMAIL_SUBJECT_PREFIX", "[IPO Checker]")
+# Public frontend URL for the confirm/unsubscribe links in subscriber emails.
+SITE_URL = _env("SITE_URL", "http://localhost:3000").rstrip("/")
+DIGEST_RESEARCH = _env_bool("DIGEST_RESEARCH", False)
 
 # --- API --------------------------------------------------------------------
 

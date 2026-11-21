@@ -10,6 +10,7 @@ from src.models.analysis import IPOAnalysis
 from src.utils.parsing import IST
 
 if TYPE_CHECKING:
+    from src.reporting.sources import SourceLink
     from src.research.digest import ResearchDigest
 
 
@@ -63,6 +64,25 @@ def _research_lines(digest: ResearchDigest) -> list[str]:
     return lines
 
 
+def _source_lines(
+    ipo_id: int,
+    sources: Mapping[int, list[SourceLink]] | None,
+    research: Mapping[int, ResearchDigest] | None,
+) -> list[str]:
+    lines = [
+        f"   Source: {link.label} -- {link.url}"
+        for link in (sources or {}).get(ipo_id, [])
+    ]
+    digest = (research or {}).get(ipo_id)
+    if digest is not None and digest.has_result and digest.sources:
+        count = len(digest.sources)
+        lines.append(
+            f"   AI research sources: {count} web page{'s' if count != 1 else ''}"
+            " (all linked in the PDF)"
+        )
+    return lines
+
+
 def build_text_summary(
     analyses: list[IPOAnalysis],
     *,
@@ -70,6 +90,7 @@ def build_text_summary(
     include_upcoming: bool = False,
     generated_at: datetime | None = None,
     research: Mapping[int, ResearchDigest] | None = None,
+    sources: Mapping[int, list[SourceLink]] | None = None,
 ) -> str:
     """Return a readable summary suitable for a terminal or an email body.
 
@@ -128,6 +149,8 @@ def build_text_summary(
 
         if research is not None and analysis.ipo_id in research:
             lines.extend(_research_lines(research[analysis.ipo_id]))
+
+        lines.extend(_source_lines(analysis.ipo_id, sources, research))
 
         lines.append("")
 

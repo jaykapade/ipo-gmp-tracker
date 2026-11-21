@@ -351,6 +351,24 @@ def _m007_research(connection: sqlite3.Connection) -> None:
     )
 
 
+def _m008_subscribers(connection: sqlite3.Connection) -> None:
+    """Email subscribers for the daily digest (double opt-in)."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS subscribers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            token TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            confirm_sent_at TEXT,
+            confirmed_at TEXT
+        );
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "initial schema", _m001_initial_schema),
     Migration(2, "ipos extended columns", _m002_ipos_extended_columns),
@@ -359,6 +377,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "gmp snapshot dedupe", _m005_gmp_dedupe),
     Migration(6, "backfill ipo sources", _m006_backfill_ipo_sources),
     Migration(7, "ai research runs and outputs", _m007_research),
+    Migration(8, "email subscribers", _m008_subscribers),
 )
 
 

@@ -26,7 +26,7 @@ of — the rule-based score.
 | Scraping | InvestorGain and IPO Watch JSON APIs; only currently open IPOs are kept; one GMP row per source per day; source provenance. |
 | Storage | SQLite with numbered, idempotent migrations. |
 | Screening & scoring | Latest-GMP screen (default **≥ 20%**), weighted transparent score, `Strong / Watch / Avoid`, checklist, strengths, risks, data gaps. |
-| Reports | ReportLab PDF and SMTP email (with dry-run); `run --research` adds each screened IPO's AI verdict; a Task Scheduler script runs it daily ([scheduling](backend/README.md#scheduling-and-email)). |
+| Reports | ReportLab PDF and SMTP email (with dry-run); `run --research` adds each screened IPO's AI verdict; every IPO lists its sources (scraped pages and research citations) as links; a Task Scheduler script runs it daily ([scheduling](backend/README.md#scheduling-and-email)). |
 | API | FastAPI: IPOs with filters and facets, detail, GMP history, analysis, reports, AI research runs, streaming chat, health. |
 | AI layer | Provider-agnostic: Ollama/LM Studio/llama.cpp/vLLM locally; OpenAI, Anthropic, Gemini, OpenRouter, Groq in the cloud; **`claude-code`** for a Claude Pro/Max subscription. Per-role models (analyst, verifier, extractor, challenger, researcher, embedder), fallback chains, cloud opt-in, off by default. |
 | AI research | Web fact gathering with source URLs, H1–H4 isolated perspectives, citation gate, verifier + dispute log, optional challenger, H5 synthesis; every output stored with provider/model/prompt provenance. |
@@ -52,6 +52,10 @@ cp .env.example .env.local          # set API_TOKEN to the backend's value
 pnpm install
 pnpm dev                            # http://localhost:3000
 ```
+
+Or with `make` (Windows: `winget install ezwinports.make`): `make install`,
+`make dev` (API + frontend together), and `make help` for the pipeline, AI,
+digest and check shortcuts.
 
 To use your Claude subscription for AI: run `claude auth login` once, then
 enable the "Claude subscription" profile in `backend/.env.local` (see
@@ -85,8 +89,11 @@ Main open items:
   dates/sizes, outlier guards, scraper health alerts, more sources.
 - **AI quality:** golden-set evaluation, prompt-injection tests, web research
   on the `anthropic` API provider for commercial use.
-- **Ops:** one-command local stack (docker-compose), scheduled runs, real auth
-  before any non-localhost exposure, generated TypeScript types from OpenAPI.
+- **Ops:** one-command local stack (docker-compose), scraper/run health
+  alerts, real auth before any non-localhost exposure, generated TypeScript
+  types from OpenAPI.
+- **AI layer:** `fastembed`/`llamacpp` rerankers, on-demand challenger
+  loading (`keep_alive=0`), review queue for low-confidence findings.
 
 ## Definition of done
 

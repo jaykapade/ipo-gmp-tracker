@@ -31,12 +31,23 @@ function formatTimestamp(value: string | undefined): string {
   });
 }
 
+const CITATION_LABEL: Record<string, string> = {
+  gmp_history: "GMP history",
+  ipo_detail: "IPO details",
+  analysis: "Rule-based analysis",
+};
+
 function renderCitation(citation: unknown): ReactNode {
   if (citation == null || typeof citation !== "object") return null;
   const record = citation as Record<string, unknown>;
   const ipoId = record["ipo_id"];
-  const name = record["name"] ?? record["label"] ?? "this IPO";
   const type = record["type"];
+  // The backend sends only type + ipo_id, so label by what was looked up.
+  const name =
+    record["name"] ??
+    record["label"] ??
+    CITATION_LABEL[String(type)] ??
+    "this IPO";
 
   if (type === "ipo_detail" || type === "gmp_history" || type === "analysis") {
     if (ipoId != null) {
@@ -285,10 +296,15 @@ export function Chat({ initialConversationId, suggestions = [] }: ChatProps) {
           </div>
         ) : (
           <>
-            {messages.map((message) => (
-              <ChatMessage key={message.id} message={message} />
-            ))}
-            {streaming && <StreamPlaceholder />}
+            {messages.map((message) =>
+              // The answer bubble exists before its first word: show the
+              // skeleton in its place, and nothing if it ended empty (Stop).
+              message.role === "assistant" && !message.content ? (
+                streaming ? <StreamPlaceholder key={message.id} /> : null
+              ) : (
+                <ChatMessage key={message.id} message={message} />
+              ),
+            )}
           </>
         )}
       </div>
@@ -320,8 +336,6 @@ export function Chat({ initialConversationId, suggestions = [] }: ChatProps) {
           </button>
         )}
       </form>
-
-      {error ? null : null}
     </div>
   );
 }

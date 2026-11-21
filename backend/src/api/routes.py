@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -25,17 +26,23 @@ from src.api.schemas import (
     ReportInfo,
     ResearchDetail,
     ResearchRunOut,
+    SubscriptionRequest,
+    SubscriptionStatus,
+    UnsubscribeRequest,
 )
 from src.database import db
 from src.llm import LLMClient
 from src.models.analysis import IPOAnalysis
 from src.pipeline import analyze_pipeline
 from src.reporting import generate_report
+from src.reporting.sources import collect_sources
+from src.reporting.subscribers import normalize_email
 from src.research import STAGES as RESEARCH_STAGES
 from src.research import ResearchJobs
 from src.utils.dedupe import find_duplicate_pairs
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 def _db_path(request: Request) -> str | Path | None:
@@ -419,6 +426,9 @@ def create_report(
         min_gmp_percent=run.min_gmp_percent,
         include_upcoming=run.include_upcoming,
         generated_at=run.generated_at,
+        sources=collect_sources(
+            [analysis.ipo_id for analysis in run.analyses], db_path=_db_path(request)
+        ),
     )
     return _report_info(path)
 
@@ -463,3 +473,52 @@ def possible_duplicates(
         )
         for pair in pairs
     ]
+
+
+# The subscriber routes are called by the frontend's server (which holds the
+# token), never by the browser. The frontend only passes the email of the
+# signed-in Google account, which Google has verified, so no confirmation email.
+def _email(raw: str) -> str:
+    email = normalize_email(raw)
+    if email is None:
+        raise HTTPException(status_code=422, detail="Enter a valid email address.")
+    return email
+
+
+@router.get(
+    "/subscribers",
+    response_model=SubscriptionStatus,
+    dependencies=[Depends(require_token)],
+    tags=["subscribers"],
+)
+def subscription_status(
+    request: Request, email: str = Query(max_length=320)
+) -> SubscriptionStatus:
+    return SubscriptionStatus(
+        subscribed=db.is_subscribed(_email(email), db_path=_db_path(request))
+    )
+
+
+@router.put(
+    "/subscribers",
+    response_model=SubscriptionStatus,
+    dependencies=[Depends(require_token)],
+    tags=["subscribers"],
+)
+def set_subscription(request: Request, payload: SubscriptionRequest) -> SubscriptionStatus:
+    db.set_subscribed(_email(payload.email), payload.subscribed, db_path=_db_path(request))
+    return SubscriptionStatus(subscribed=payload.subscribed)
+
+
+@router.post(
+    "/subscribers/unsubscribe",
+    response_model=SubscriptionStatus,
+    dependencies=[Depends(require_token)],
+    tags=["subscribers"],
+)
+def unsubscribe(request: Request, payload: UnsubscribeRequest) -> SubscriptionStatus:
+    """The unsubscribe link in every email; works without signing in."""
+
+    if not db.unsubscribe_token(payload.token, db_path=_db_path(request)):
+        raise HTTPException(status_code=404, detail="This link is not valid.")
+    return SubscriptionStatus(subscribed=False)

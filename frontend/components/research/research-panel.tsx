@@ -72,8 +72,8 @@ function StageProgress({ run }: { run: ResearchDetail }) {
 }
 
 /**
- * The "AI Research" tab: start a run, follow its stages, and render the
- * newest completed result. Starting goes through the Next route handler
+ * The "AI Research" tab: start a run (only offered while no completed result
+ * exists), follow its stages, and render the newest completed result. Starting goes through the Next route handler
  * (`/api/research/[id]`), which adds the API token server-side.
  */
 export function ResearchPanel({
@@ -113,11 +113,7 @@ export function ResearchPanel({
         const body = (await response.json().catch(() => null)) as {
           detail?: string;
         } | null;
-        setError(
-          response.status === 401
-            ? "The API rejected the token. Set API_TOKEN in frontend/.env.local to match backend/.env."
-            : body?.detail ?? `Could not start research (HTTP ${response.status}).`,
-        );
+        setError(body?.detail ?? `Could not start research (HTTP ${response.status}).`);
         return;
       }
       await refresh();
@@ -138,20 +134,17 @@ export function ResearchPanel({
           title="AI research"
           description="Claude gathers cited facts from the web, writes four isolated perspectives, an independent verifier challenges them, and a synthesis is shown beside the rule-based score."
           actions={
-            <button
-              type="button"
-              onClick={start}
-              disabled={!aiEnabled || active || starting}
-              className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {active
-                ? "Research running…"
-                : starting
-                  ? "Starting…"
-                  : completed
-                    ? "Re-run research"
-                    : "Run AI research"}
-            </button>
+            // Research costs subscription quota: offer it only when none exists yet.
+            !completed || active ? (
+              <button
+                type="button"
+                onClick={start}
+                disabled={!aiEnabled || active || starting}
+                className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {active ? "Research running…" : starting ? "Starting…" : "Run AI research"}
+              </button>
+            ) : undefined
           }
         />
         <CardContent className="space-y-4">

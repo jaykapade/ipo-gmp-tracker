@@ -31,10 +31,11 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from src.api.routes import require_token
 from src.database import db
 from src.llm import LLMError, LLMMessage
 
@@ -106,11 +107,11 @@ def _extract_name_candidates(message: str) -> list[str]:
     return candidates
 
 
-def _format_money(value: Any) -> str:
+def _format_price(value: Any) -> str:
     if value is None:
         return "not disclosed"
     try:
-        return f"₹{float(value):,.2f} cr"
+        return f"₹{float(value):,.2f}"
     except (TypeError, ValueError):
         return str(value)
 
@@ -279,7 +280,7 @@ def _compose_grounded_answer(
     if data_as_of:
         answer_parts.append(f" (as of {data_as_of})")
     answer_parts.append(
-        f": **{name}** — {detail.get('category') or 'IPO'} on "
+        f": {name} — {detail.get('category') or 'IPO'} on "
         f"{detail.get('exchange') or 'the exchange'}."
     )
 
@@ -303,7 +304,7 @@ def _compose_grounded_answer(
 
     answer_parts.append(
         f"It closes {close_date or 'on an undisclosed date'}, with an issue price "
-        f"of {_format_money(issue_price)}"
+        f"of {_format_price(issue_price)} a share"
     )
     if subscription is not None:
         answer_parts.append(f", subscribed {subscription:.1f}x")
@@ -484,7 +485,8 @@ def _chunk(text: str, size: int = 12) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
-@router.post("/chat", tags=["chat"])
+# Token-protected: with AI on, every question costs an AI call.
+@router.post("/chat", tags=["chat"], dependencies=[Depends(require_token)])
 async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     """Stream a grounded, tool-based answer to a user question."""
 

@@ -3,6 +3,8 @@ import { Suspense } from "react";
 
 import { AiStatus } from "@/components/shell/ai-status";
 import { SiteNav, SiteNavFallback } from "@/components/shell/site-nav";
+import { DailyEmail } from "@/components/shell/daily-email";
+import { UserMenu } from "@/components/shell/user-menu";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
@@ -28,6 +30,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Suspense fallback={<SiteNavFallback />}>
               <SiteNav />
             </Suspense>
+            <Suspense fallback={null}>
+              <UserMenu />
+            </Suspense>
           </div>
         </div>
       </header>
@@ -38,6 +43,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <footer className="border-t border-border/80">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-4 py-6 text-xs leading-5 text-muted-foreground sm:px-6">
+          <div className="mb-3 border-b border-border/80 pb-5">
+            <Suspense fallback={null}>
+              <DailyEmail />
+            </Suspense>
+          </div>
           <p>
             Grey-market premium is unofficial, speculative and can vanish
             before listing. This dashboard is for personal research and is{" "}

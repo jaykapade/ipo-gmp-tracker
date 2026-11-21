@@ -99,9 +99,12 @@ every key; the important groups are:
 | API | `API_HOST`, `API_PORT`, `API_TOKEN`, `CORS_ORIGINS` |
 | AI | `LLM_*`, `LLM_ROLE_<ROLE>_*`, `RERANK_PROVIDER`, `RESEARCH_*` — see below |
 
-`API_TOKEN` protects the mutating endpoints (`POST /api/analyze`,
-`/api/reports`, `/api/ipos/{id}/research`). Change it from `change-me` and set
-the same value as `API_TOKEN` in `frontend/.env.local`.
+`API_TOKEN` protects the endpoints that change data or spend AI quota
+(`POST /api/analyze`, `/api/reports`, `/api/ipos/{id}/research`, `/api/chat`,
+`/api/subscribers*`). Only the frontend's server sends it, after checking the
+visitor's Google sign-in, so the backend knows the request came through that
+check. Change it from `change-me` and set the same value as `API_TOKEN` in
+`frontend/.env.local`.
 
 ## AI: providers, roles and profiles
 
@@ -188,6 +191,7 @@ Tunables: `RESEARCH_TIMEOUT_SECONDS` (600), `RESEARCH_MAX_TURNS` (30).
 | 3. Research | `research <id>` / `--all-open`, the UI button, or `run --research` | Yes |
 | 4. Report | `report` — analyse + PDF (+ `--email`) | Only with `--research` |
 | All | `run` — 1 → 2 → (3) → 4 | Only with `--research` |
+| Digest | `notify` — open IPOs + latest GMP to confirmed subscribers | No |
 
 `run --research --email` is the scheduled job. After the analysis it
 researches only the IPOs that passed the screen, one at a time:
@@ -198,29 +202,85 @@ researches only the IPOs that passed the screen, one at a time:
 - if AI is off, or a run fails, the report still goes out with a note, and the
   previous completed result (if any) is shown, labelled as such.
 
-The PDF gains an "AI view" column and an "AI research" block per IPO
-(verdict, confidence, disputes, conclusion, top strengths and risks, when it
-was researched). The email body gets the verdict plus the top strength and
-risk. The rule-based score is unchanged by any of it.
+The PDF opens with an overview page (verdict counts and a summary table) and
+gives each IPO its own page: verdict tiles (rule-based score beside the AI
+view), key numbers, rule-based strengths/risks/gaps, the AI research block
+(conclusion, top strengths and risks, when it was researched), the score
+breakdown, the checklist and the sources. The email is HTML (one card per IPO
+with both verdicts, key numbers, the top strength/risk and the opening of the
+AI view) with a plain-text alternative, and the PDF attached. The rule-based
+score is unchanged by any of it.
+
+Every report also ends each IPO with a **Sources** block of clickable links:
+the market-data pages the numbers were scraped from (the IPO Watch detail
+page, the InvestorGain GMP board at `INVESTORGAIN_PAGE_URL`, and the RHP when
+known), then the web pages the AI research cited, official and exchange
+sources first (up to 30; the rest are in the app's AI research tab). The
+email body lists the market-data links and a count of the research sources.
 
 Time and cost: ~2–5 minutes and ~7 model calls per IPO that needs fresh
 research; with the default 20% screen that is usually 0–3 IPOs a day.
 
 ### Email setup
 
-Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` (Gmail: an app
-password), `EMAIL_FROM` and `EMAIL_TO` in `.env.local`, then check it without
-sending:
+Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM` and
+`EMAIL_TO` in `.env.local`, then check it without sending.
+
+For Gmail: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USE_TLS=true`,
+`SMTP_USER` = the Gmail address. `SMTP_PASSWORD` must be a 16-character **app
+password** (Google Account → Security → 2-Step Verification → App passwords),
+not the normal account password; Gmail rejects that over SMTP.
+
+For Mailjet (free plan, ~200 emails/day): `SMTP_HOST=in-v3.mailjet.com`,
+`SMTP_PORT=587`, `SMTP_USE_TLS=true`, `SMTP_USER` = the API key,
+`SMTP_PASSWORD` = the secret key (Account settings → API keys).
+`EMAIL_FROM` must be a sender address verified in Mailjet (Account settings →
+Senders & domains).
+
+**Landing in spam?** A `@gmail.com` (or other free-mail) `EMAIL_FROM` sent
+through Mailjet fails DMARC alignment, because Gmail's domain does not
+authorise Mailjet's servers, so receivers treat it as spoofed. Use an address on
+a domain you own and add Mailjet's SPF and DKIM DNS records for it (Senders &
+domains → the domain → "Setup SPF/DKIM"), then add a DMARC record. Marking the
+first mails "Not spam" also trains your own inbox.
 
 ```bash
 uv run python -m src.main run --research --email --dry-run
 ```
 
+### Subscribers (daily digest)
+
+Signed-in visitors turn the daily email on or off in the frontend footer. It
+goes to their Google account's address, which Google has already verified, so
+there is no confirmation email. Every email has an unsubscribe link to
+`SITE_URL/subscription?action=unsubscribe&token=…` that works without signing
+in.
+
+`notify` emails every confirmed subscriber the open IPOs with their latest GMP
+(highest GMP first, up to 50), one email per subscriber with their own
+unsubscribe link (also as a `List-Unsubscribe` header). Nothing is sent on days
+without open IPOs. The scheduled script runs it after the report.
+
+`notify --research` sends subscribers the same email as `run --research
+--email` instead (the screened IPOs, AI research and the PDF), plus their
+unsubscribe link. It uses stored research and never starts a run, so run it
+after `run --research`; nothing is sent when no IPO passes the screen. Set
+`DIGEST_RESEARCH=true` in `.env.local` to make that the default, which also
+turns it on for the scheduled job; `--no-research` sends the digest once.
+
+```bash
+uv run python -m src.main notify --dry-run
+```
+
+Before inviting other people: the sender must be allowed to mail any address
+(a Mailjet account with a verified own domain, see "Landing in spam?"), and the
+free Mailjet plan caps sending at about 200 emails a day.
+
 ### Windows Task Scheduler
 
 `scripts/scheduled-run.ps1` runs the job from `backend/` and appends output
 to `logs/scheduled-YYYY-MM-DD.log`. Try it once by hand (`-DryRun` skips
-sending; `-NoResearch` skips AI):
+sending; `-NoResearch` skips AI; `-NoNotify` skips the subscriber digest):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\scheduled-run.ps1 -DryRun
@@ -262,7 +322,9 @@ Start with `uv run python -m src.main serve`; interactive docs at
 | GET / POST | `/api/reports` | List PDFs / **token** generate one |
 | GET | `/api/reports/{filename}` | Download a PDF |
 | GET | `/api/quality/duplicates` | Possible cross-source duplicates |
-| POST | `/api/chat` | Streaming (SSE) grounded chat |
+| POST | `/api/chat` | **Token.** Streaming (SSE) grounded chat (the frontend proxies it) |
+| GET / PUT | `/api/subscribers` | **Token.** `?email=` → `{subscribed}` / `{email, subscribed}` turns the daily email on or off |
+| POST | `/api/subscribers/unsubscribe` | **Token.** `{token}` from the email link; `404` if unknown |
 
 ## Data sources
 
@@ -303,7 +365,7 @@ backend/
 │   ├── database/          # migrations + query helpers
 │   ├── llm/               # provider contract, providers, client, reranker
 │   ├── research/          # schemas, prompts, gather, orchestrator, jobs
-│   ├── reporting/         # PDF, email, text summary
+│   ├── reporting/         # PDF, email, text summary, subscriber digest
 │   ├── scrapers/          # InvestorGain, IPO Watch
 │   └── utils/             # HTTP, parsing, normalisation, dedupe
 └── tests/                 # pytest suite (offline; fakes for HTTP and the CLI)
@@ -329,5 +391,7 @@ uv run ruff check src tests
    yet wire up server-side web search.
 6. **Email** has no delivery log or retry, so a schedule that runs twice in a
    day sends twice; the PDF has no charts or deep links.
-7. **Auth** is a single shared `API_TOKEN` on mutating endpoints — fine for
-   localhost, not for exposure to the internet.
+7. **Auth**: the backend trusts one shared `API_TOKEN` from the frontend's
+   server, which checks Google sign-in. Keep the backend's port private (only
+   the frontend should reach it). Any Google account can sign in, so anyone
+   who signs in can spend AI quota on chat and research.

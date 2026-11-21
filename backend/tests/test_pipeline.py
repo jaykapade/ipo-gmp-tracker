@@ -196,6 +196,18 @@ def test_scrape_sources_persists_a_derived_status(tmp_path, monkeypatch):
     assert saved["status"] == "open"
 
 
+def test_scrape_sources_closes_ipos_past_their_close_date(tmp_path, monkeypatch):
+    db_path = tmp_path / "test.db"
+    db.save_ipo_with_gmp(make_ipo("Ended Ltd", close_date="2020-01-01"), "test", db_path=db_path)
+    db.save_ipo_with_gmp(make_ipo("Running Ltd"), "test", db_path=db_path)
+    monkeypatch.setitem(SCRAPERS, "failing", FailingScraper(request_delay=0))
+
+    scrape_sources(["failing"], db_path=db_path)
+
+    statuses = {row["name"]: row["status"] for row in db.list_ipos(db_path=db_path)}
+    assert statuses == {"Ended Ltd": "closed", "Running Ltd": "Open"}
+
+
 def test_scrape_sources_marks_fetch_failure(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setitem(SCRAPERS, "failing", FailingScraper(request_delay=0))

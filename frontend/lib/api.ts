@@ -183,10 +183,8 @@ export const api = {
     message: string,
     conversationId?: string | null,
   ): AsyncGenerator<{ type: string; data: unknown }, void, unknown> {
-    const params = new URLSearchParams();
-    if (conversationId?.trim()) params.set("conversation_id", conversationId.trim());
-
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    // Same-origin Next route: it adds the API token server-side.
+    const response = await fetch("/api/chat", {
       method: "POST",
       headers: {
         Accept: "text/event-stream",

@@ -16,6 +16,7 @@ from src.database import db
 from src.models.ipo import IPO
 from src.utils.normalization import normalize_name
 
+AUTH = {"X-API-Token": "test-token"}
 
 def make_ipo(name: str, *, gmp_percent: float, status: str = "Open") -> IPO:
     return IPO(
@@ -91,7 +92,7 @@ def client(tmp_path):
         llm_settings=LLMSettings(),
     )
 
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH) as test_client:
         yield test_client
 
 
@@ -123,6 +124,7 @@ def test_chat_streams_answer_for_known_ipo(client):
     )
     assert "Above Ltd" in content
     assert "30.0%" in content or "30%" in content
+    assert "issue price of ₹100.00 a share" in content
 
 
 def test_chat_refuses_when_no_match(client):
@@ -144,6 +146,13 @@ def test_chat_refuses_when_no_match(client):
     )
     assert "couldn't find" in content.lower() or "empty" in content.lower()
 
+
+
+def test_chat_requires_token(client):
+    response = client.post(
+        "/api/chat", json={"message": "hi"}, headers={"X-API-Token": "wrong"}
+    )
+    assert response.status_code == 401
 
 def test_chat_requires_message(client):
     response = client.post("/api/chat", json={})
@@ -232,7 +241,7 @@ def llm_app(tmp_path):
 def test_chat_uses_configured_llm_when_available(llm_app):
     app = llm_app(post_responses=[_completion("Above Ltd carries a 30% premium.")])
 
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH) as test_client:
         response = test_client.post(
             "/api/chat", json={"message": "Tell me about Above Ltd"}
         )
@@ -258,7 +267,7 @@ def test_chat_uses_configured_llm_when_available(llm_app):
 def test_chat_falls_back_to_deterministic_answer_when_llm_fails(llm_app):
     app = llm_app(post_responses=[])  # provider raises on every call
 
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH) as test_client:
         response = test_client.post(
             "/api/chat", json={"message": "Tell me about Above Ltd"}
         )

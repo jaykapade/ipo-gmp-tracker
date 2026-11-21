@@ -8,6 +8,7 @@ import smtplib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 
 from src import config
@@ -93,15 +94,30 @@ def build_message(
     *,
     subject: str,
     body: str,
+    html: str | None = None,
     attachments: Iterable[str | Path] = (),
+    list_unsubscribe: str | None = None,
 ) -> EmailMessage:
-    """Build the ``EmailMessage`` without connecting to a server."""
+    """Build the ``EmailMessage`` without connecting to a server.
+
+    ``body`` is the plain-text part; ``html``, when given, is added as the
+    preferred alternative (clients without HTML show the text).
+    """
 
     message = EmailMessage()
     message["Subject"] = f"{settings.subject_prefix} {subject}".strip()
     message["From"] = settings.sender
     message["To"] = ", ".join(settings.recipients)
+    # Missing Date/Message-ID headers count against a message in spam filters.
+    message["Date"] = formatdate(localtime=True)
+    domain = settings.sender.rpartition("@")[2].strip("> ") or None
+    message["Message-ID"] = make_msgid(domain=domain)
+    if list_unsubscribe:
+        # Gmail and Outlook show their own "Unsubscribe" button for list mail.
+        message["List-Unsubscribe"] = f"<{list_unsubscribe}>"
     message.set_content(body)
+    if html:
+        message.add_alternative(html, subtype="html")
 
     for attachment in attachments:
         path = Path(attachment)
@@ -124,9 +140,11 @@ def send_email(
     *,
     subject: str,
     body: str,
+    html: str | None = None,
     attachments: Iterable[str | Path] = (),
     settings: EmailSettings | None = None,
     dry_run: bool = False,
+    list_unsubscribe: str | None = None,
 ) -> EmailResult:
     """Send an email, or validate and describe it when ``dry_run`` is true."""
 
@@ -138,7 +156,9 @@ def send_email(
         resolved,
         subject=subject,
         body=body,
+        html=html,
         attachments=paths,
+        list_unsubscribe=list_unsubscribe,
     )
 
     result = EmailResult(

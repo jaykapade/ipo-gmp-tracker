@@ -6,6 +6,7 @@ import pytest
 
 from src.analysis.analyzer import analyze_candidate
 from src.analysis.filters import Candidate
+from src.reporting.email_html import build_html_summary
 from src.reporting.emailer import (
     EmailConfigError,
     EmailSettings,
@@ -103,6 +104,29 @@ def test_build_message_includes_prefix_and_attachment(tmp_path):
 
     parts = list(message.iter_parts())
     assert any(part.get_filename() == "report.pdf" for part in parts)
+    assert message["Date"] and message["Message-ID"].endswith("@example.com>")
+
+
+def test_html_email_has_text_fallback_and_escapes_values(tmp_path):
+    attachment = tmp_path / "report.pdf"
+    attachment.write_bytes(b"%PDF-1.4 test")
+    analysis = make_analysis().model_copy(update={"name": "<b>Evil</b> & Co"})
+    html = build_html_summary([analysis], min_gmp_percent=20)
+
+    assert "&lt;b&gt;Evil&lt;/b&gt; &amp; Co" in html
+    assert "<b>Evil</b>" not in html
+
+    message = build_message(
+        EmailSettings(host="h", sender="a@example.com", recipients=("b@example.com",)),
+        subject="Daily report",
+        body="Plain body",
+        html=html,
+        attachments=[attachment],
+    )
+    types = [part.get_content_type() for part in message.walk()]
+    assert types[:3] == ["multipart/mixed", "multipart/alternative", "text/plain"]
+    assert "text/html" in types and "application/pdf" in types
+    assert message.get_body(("html",)).get_content() == html
 
 
 def test_send_email_dry_run_does_not_connect(tmp_path):

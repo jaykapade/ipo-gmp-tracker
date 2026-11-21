@@ -389,14 +389,16 @@ def test_migration_7_is_idempotent(tmp_path):
     assert {"research_runs", "ai_outputs"} <= tables
 
 
-def test_stale_runs_are_failed_on_startup(db_path):
+def test_only_old_unfinished_runs_are_failed(db_path):
     run_id = db.create_research_run(1, prompt_version="v", db_path=db_path)
     db.update_research_run(run_id, status="running", stage="verify", db_path=db_path)
 
-    assert db.mark_stale_research_runs_failed(db_path=db_path) == 1
+    # A fresh run may belong to another live process: leave it alone.
+    assert db.mark_stale_research_runs_failed(db_path=db_path) == 0
+    assert db.mark_stale_research_runs_failed(older_than_hours=0, db_path=db_path) == 1
     run = db.get_research_run(run_id, db_path=db_path)
     assert run["status"] == "failed"
-    assert "restarted" in run["error"]
+    assert "interrupted" in run["error"]
 
 
 def test_jobs_deduplicate_active_runs(db_path):

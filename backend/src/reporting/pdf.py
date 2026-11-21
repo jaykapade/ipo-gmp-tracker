@@ -1,26 +1,29 @@
 """PDF report generation using ReportLab.
 
-The report mirrors the deterministic analysis payload: scores, factor
-weights, checklist results and explicit data gaps. When research digests are
-passed, each IPO also gets a clearly labelled "AI research" block (verdict,
-confidence, strengths, risks) shown beside -- never instead of -- the
-rule-based score.
+Layout: page 1 is the overview (verdict counts and a summary table); every
+IPO then gets its own page with verdict tiles (rule-based score and, when
+research digests are passed, the AI view beside it), key numbers, the
+rule-based strengths/risks/gaps, the AI research block, the score breakdown,
+the checklist and a "Sources" block of clickable links (scraped market-data
+pages and the web sources the AI research cited). Every page carries a small
+header and a footer with the page number.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    KeepTogether,
+    ListFlowable,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -30,155 +33,175 @@ from reportlab.platypus import (
 
 from src import config
 from src.models.analysis import ChecklistItem, IPOAnalysis, ScoreFactor
-from src.reporting.summary import format_research_time, research_headline
+from src.reporting.sources import SourceLink
+from src.reporting.summary import (
+    _number,
+    _rupees,
+    format_research_time,
+    research_headline,
+)
 from src.utils.parsing import IST
 
 if TYPE_CHECKING:
     from src.research.digest import ResearchDigest
 
+_INK = colors.HexColor("#101828")
+_MUTED = colors.HexColor("#667085")
+_BORDER = colors.HexColor("#EAECF0")
+_HEADER_BG = colors.HexColor("#F2F4F7")
+_BAND = colors.HexColor("#FCFCFD")
+_BRAND = colors.HexColor("#1D4ED8")
+_LINK = "#1D4ED8"
+
 _VERDICT_COLORS = {
     "Strong": colors.HexColor("#1B7F3B"),
-    "Watch": colors.HexColor("#B7791F"),
+    "Watch": colors.HexColor("#B54708"),
     "Avoid": colors.HexColor("#B42318"),
 }
-
+_VERDICT_TINTS = {
+    "Strong": colors.HexColor("#ECFDF3"),
+    "Watch": colors.HexColor("#FFFAEB"),
+    "Avoid": colors.HexColor("#FEF3F2"),
+}
 _STATUS_COLORS = {
     "pass": colors.HexColor("#1B7F3B"),
-    "warn": colors.HexColor("#B7791F"),
+    "warn": colors.HexColor("#B54708"),
     "fail": colors.HexColor("#B42318"),
-    "manual": colors.HexColor("#475467"),
+    "manual": _MUTED,
 }
 
-_HEADER_BG = colors.HexColor("#EEF2F6")
-_BORDER = colors.HexColor("#D0D5DD")
-_MUTED = colors.HexColor("#475467")
+PAGE_WIDTH, PAGE_HEIGHT = A4
+MARGIN = 16 * mm
+CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
+
+# Research runs can cite dozens of pages; the PDF lists the first ones.
+MAX_RESEARCH_SOURCES = 30
 
 
 def _safe(value: object) -> str:
-    """Escape ReportLab paragraph markup and drop unsupported glyphs."""
+    """Escape ReportLab paragraph markup; Helvetica has no rupee glyph."""
 
-    text = str(value).replace("₹", "Rs. ")
-    return escape(text)
+    return escape(str(value).replace("₹", "Rs. "))
 
 
-def _number(value: float | None, suffix: str = "") -> str:
-    if value is None:
+def _date(value: str | None) -> str:
+    """'2026-11-23' -> '23 Nov 2026' (other values pass through)."""
+
+    if not value:
         return "n/a"
-    return f"{value:,.2f}{suffix}"
+    try:
+        return date.fromisoformat(value).strftime("%d %b %Y")
+    except ValueError:
+        return value
 
 
-def _rupees(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"Rs {value:,.2f}"
+def _style(name: str, **kwargs) -> ParagraphStyle:
+    values = {"fontName": "Helvetica", "fontSize": 9, "leading": 12, "textColor": _INK}
+    values.update(kwargs)
+    return ParagraphStyle(name, **values)
 
 
 def _styles() -> dict[str, ParagraphStyle]:
-    base = getSampleStyleSheet()
-
     return {
-        "title": ParagraphStyle(
-            "Title",
-            parent=base["Title"],
-            fontName="Helvetica-Bold",
-            fontSize=20,
-            leading=24,
-            spaceAfter=4,
-            alignment=0,
-            textColor=colors.HexColor("#101828"),
+        "title": _style("Title", fontName="Helvetica-Bold", fontSize=22, leading=26),
+        "subtitle": _style("Subtitle", fontSize=9.5, leading=13, textColor=_MUTED),
+        "ipo": _style("IPO", fontName="Helvetica-Bold", fontSize=18, leading=22),
+        "h2": _style(
+            "H2", fontName="Helvetica-Bold", fontSize=11.5, leading=14,
+            spaceBefore=12, spaceAfter=5, keepWithNext=1,
         ),
-        "subtitle": ParagraphStyle(
-            "Subtitle",
-            parent=base["Normal"],
-            fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            textColor=_MUTED,
-        ),
-        "h2": ParagraphStyle(
-            "H2",
-            parent=base["Heading2"],
-            fontName="Helvetica-Bold",
-            fontSize=12.5,
-            leading=15,
-            spaceBefore=10,
-            spaceAfter=4,
-            textColor=colors.HexColor("#101828"),
-        ),
-        "body": ParagraphStyle(
-            "Body",
-            parent=base["Normal"],
-            fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            spaceAfter=3,
-        ),
-        "small": ParagraphStyle(
-            "Small",
-            parent=base["Normal"],
-            fontName="Helvetica",
-            fontSize=8,
-            leading=10.5,
-            textColor=_MUTED,
-        ),
-        "cell": ParagraphStyle(
-            "Cell",
-            parent=base["Normal"],
-            fontName="Helvetica",
-            fontSize=7.5,
-            leading=9.5,
-        ),
-        "cell_bold": ParagraphStyle(
-            "CellBold",
-            parent=base["Normal"],
-            fontName="Helvetica-Bold",
-            fontSize=7.5,
-            leading=9.5,
-        ),
-        "verdict": ParagraphStyle(
-            "Verdict",
-            parent=base["Normal"],
-            fontName="Helvetica-Bold",
-            fontSize=10,
-            leading=12,
+        "body": _style("Body", fontSize=9, leading=13, spaceAfter=3),
+        "small": _style("Small", fontSize=7.5, leading=10, textColor=_MUTED),
+        "label": _style("Label", fontSize=7, leading=9, textColor=_MUTED),
+        "value": _style("Value", fontName="Helvetica-Bold", fontSize=11, leading=14),
+        "tile_value": _style("TileValue", fontName="Helvetica-Bold", fontSize=15, leading=19),
+        "cell": _style("Cell", fontSize=8, leading=10.5),
+        "cell_bold": _style("CellBold", fontName="Helvetica-Bold", fontSize=8, leading=10.5),
+        "th": _style("TH", fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=_MUTED),
+        "link": _style("Link", fontSize=8, leading=10.5),
+        "url": _style(
+            "Url", fontSize=6.5, leading=8.5, spaceAfter=3, textColor=_MUTED,
+            wordWrap="CJK",  # long URLs have no spaces; let them break anywhere
         ),
     }
 
 
-def _paragraph(value: object, style: ParagraphStyle) -> Paragraph:
+def _p(value: object, style: ParagraphStyle) -> Paragraph:
     return Paragraph(_safe(value), style)
 
 
-def _base_table_style(header: bool = True) -> list[tuple]:
-    commands: list[tuple] = [
-        ("GRID", (0, 0), (-1, -1), 0.4, _BORDER),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]
-    if header:
-        commands.extend(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ]
-        )
-    return commands
+def _colored(value: object, style: ParagraphStyle, color: colors.Color) -> Paragraph:
+    return Paragraph(_safe(value), ParagraphStyle(f"{style.name}-c", parent=style, textColor=color))
 
 
-def _verdict_cell(
-    verdict: str | None, styles: dict[str, ParagraphStyle]
-) -> Paragraph:
-    return Paragraph(
-        _safe(verdict or "n/a"),
-        ParagraphStyle(
-            "VerdictCell",
-            parent=styles["cell_bold"],
-            textColor=_VERDICT_COLORS.get(verdict or "", _MUTED),
-        ),
+def _bullets(values: list[str], style: ParagraphStyle) -> ListFlowable:
+    return ListFlowable(
+        [_p(value, style) for value in values],
+        bulletType="bullet",
+        start="•",
+        bulletFontSize=8,
+        leftIndent=10,
     )
+
+
+def _data_table(data: list[list], widths_mm: list[float], *, total_row: bool = False) -> Table:
+    """Full-width table: muted header row, light row bands, hairline rules."""
+
+    table = Table(data, colWidths=[w * mm for w in widths_mm], repeatRows=1, hAlign="LEFT")
+    commands: list[tuple] = [
+        ("BACKGROUND", (0, 0), (-1, 0), _HEADER_BG),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _BAND]),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if total_row:
+        commands += [
+            ("BACKGROUND", (0, -1), (-1, -1), _HEADER_BG),
+            ("LINEABOVE", (0, -1), (-1, -1), 0.8, _INK),
+        ]
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _tiles(cells: list[list], backgrounds: list[colors.Color], height_pad: float = 7) -> Table:
+    """A row of tinted tiles separated by white gutters."""
+
+    width = CONTENT_WIDTH / len(cells)
+    table = Table([cells], colWidths=[width] * len(cells), hAlign="LEFT")
+    commands: list[tuple] = [
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), height_pad),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), height_pad),
+        ("LINEAFTER", (0, 0), (-2, -1), 4, colors.white),
+    ]
+    commands += [("BACKGROUND", (i, 0), (i, 0), bg) for i, bg in enumerate(backgrounds)]
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+# --- Overview page -------------------------------------------------------------
+
+
+def _count_tiles(analyses: list[IPOAnalysis], styles: dict) -> Table:
+    counts = [("Candidates", str(len(analyses)), _INK, _HEADER_BG)]
+    for verdict in ("Strong", "Watch", "Avoid"):
+        total = sum(1 for a in analyses if a.verdict == verdict)
+        counts.append((verdict, str(total), _VERDICT_COLORS[verdict], _VERDICT_TINTS[verdict]))
+    return _tiles(
+        [[_p(label, styles["label"]), _colored(value, styles["tile_value"], color)]
+         for label, value, color, _ in counts],
+        [bg for *_, bg in counts],
+    )
+
+
+def _verdict_text(verdict: str | None, style: ParagraphStyle) -> Paragraph:
+    return _colored(verdict or "n/a", style, _VERDICT_COLORS.get(verdict or "", _MUTED))
 
 
 def _summary_table(
@@ -186,205 +209,166 @@ def _summary_table(
     styles: dict[str, ParagraphStyle],
     research: Mapping[int, ResearchDigest] | None = None,
 ) -> Table:
-    header = ["IPO", "Verdict", "Score", "GMP %", "Issue", "Closes"]
-    widths = [52, 20, 14, 18, 24, 22]
+    header = ["#", "IPO", "Rule-based", "Score", "GMP %", "Issue price", "Closes"]
+    widths = [8, 52, 22, 15, 18, 24, 22]
     if research is not None:
         header.append("AI view")
-        widths = [46, 18, 13, 16, 22, 20, 26]
+        widths = [8, 44, 21, 14, 17, 23, 22, 17]
+    widths[1] += CONTENT_WIDTH / mm - sum(widths)  # the name column takes the rest
 
-    data: list[list[Paragraph]] = [
-        [_paragraph(label, styles["cell_bold"]) for label in header]
-    ]
-
-    for analysis in analyses:
+    data: list[list] = [[_p(label, styles["th"]) for label in header]]
+    for index, analysis in enumerate(analyses, start=1):
         row = [
-            _paragraph(analysis.name, styles["cell"]),
-            _verdict_cell(analysis.verdict, styles),
-            _paragraph(f"{analysis.score:.1f}", styles["cell"]),
-            _paragraph(_number(analysis.gmp_percent, "%"), styles["cell"]),
-            _paragraph(_rupees(analysis.issue_price), styles["cell"]),
-            _paragraph(analysis.close_date or "n/a", styles["cell"]),
+            _p(index, styles["cell"]),
+            _p(analysis.name, styles["cell_bold"]),
+            _verdict_text(analysis.verdict, styles["cell_bold"]),
+            _p(f"{analysis.score:.1f}", styles["cell"]),
+            _p(_number(analysis.gmp_percent, "%"), styles["cell"]),
+            _p(_rupees(analysis.issue_price), styles["cell"]),
+            _p(_date(analysis.close_date), styles["cell"]),
         ]
         if research is not None:
             digest = research.get(analysis.ipo_id)
-            if digest is not None and digest.has_result:
-                row.append(_verdict_cell(digest.verdict, styles))
-            else:
-                row.append(_paragraph("n/a", styles["cell"]))
+            has = digest is not None and digest.has_result
+            row.append(_verdict_text(digest.verdict if has else None, styles["cell_bold"]))
         data.append(row)
-
-    table = Table(
-        data,
-        colWidths=[width * mm for width in widths],
-        repeatRows=1,
-    )
-    table.setStyle(TableStyle(_base_table_style()))
-    return table
+    return _data_table(data, widths)
 
 
-def _meta_table(
+# --- Per-IPO page --------------------------------------------------------------
+
+
+def _verdict_tiles(
     analysis: IPOAnalysis,
-    styles: dict[str, ParagraphStyle],
+    digest: ResearchDigest | None,
+    styles: dict,
+    with_research: bool,
 ) -> Table:
-    rows = [
+    cells = [[
+        _p("RULE-BASED SCORE", styles["label"]),
+        _verdict_text(analysis.verdict, styles["tile_value"]),
+        _p(f"{analysis.score:.1f} / 100", styles["cell"]),
+    ]]
+    backgrounds = [_VERDICT_TINTS.get(analysis.verdict, _HEADER_BG)]
+    if with_research:
+        if digest is not None and digest.has_result:
+            detail = research_headline(digest).split("(", 1)[-1].rstrip(")")
+            cells.append([
+                _p("AI RESEARCH VIEW", styles["label"]),
+                _verdict_text(digest.verdict, styles["tile_value"]),
+                _p(detail, styles["cell"]),
+            ])
+            backgrounds.append(_VERDICT_TINTS.get(digest.verdict or "", _HEADER_BG))
+        else:
+            cells.append([
+                _p("AI RESEARCH VIEW", styles["label"]),
+                _p("Not available", styles["tile_value"]),
+                _p((digest.note if digest else None) or "No AI research yet.", styles["cell"]),
+            ])
+            backgrounds.append(_HEADER_BG)
+    return _tiles(cells, backgrounds)
+
+
+def _metric_grid(analysis: IPOAnalysis, styles: dict) -> Table:
+    gmp_percent = _number(analysis.gmp_percent, "%")
+    if analysis.gmp_percent_derived:
+        gmp_percent += " (derived)"
+    metrics = [
         ("GMP", _rupees(analysis.gmp)),
-        (
-            "GMP %",
-            _number(analysis.gmp_percent, "%")
-            + (" (derived)" if analysis.gmp_percent_derived else ""),
-        ),
+        ("GMP %", gmp_percent),
         ("Issue price", _rupees(analysis.issue_price)),
-        ("Issue size", _number(analysis.issue_size_cr, " cr")),
+        ("Closes", _date(analysis.close_date)),
         ("Subscription", _number(analysis.subscription, "x")),
         ("P/E", _number(analysis.pe)),
-        ("Closes", analysis.close_date or "n/a"),
+        ("Issue size", _number(analysis.issue_size_cr, " cr")),
+        ("Score", f"{analysis.score:.1f} / 100"),
     ]
-
-    data = [
-        [
-            _paragraph(label, styles["cell_bold"]),
-            _paragraph(value, styles["cell"]),
-            _paragraph("", styles["cell"]),
-            _paragraph("", styles["cell"]),
-        ]
-        for label, value in rows
-    ]
-
-    table = Table(
-        data,
-        colWidths=[24 * mm, 40 * mm, 24 * mm, 40 * mm],
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.4, _BORDER),
-                ("BACKGROUND", (0, 0), (0, -1), _HEADER_BG),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
+    cells = [[_p(label, styles["label"]), _p(value, styles["value"])] for label, value in metrics]
+    width = CONTENT_WIDTH / 4
+    table = Table([cells[:4], cells[4:]], colWidths=[width] * 4, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), _BAND),
+        ("BOX", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
     return table
 
 
-def _factors_table(
-    factors: list[ScoreFactor],
-    styles: dict[str, ParagraphStyle],
-) -> Table:
-    data: list[list[Paragraph]] = [
-        [
-            _paragraph("Factor", styles["cell_bold"]),
-            _paragraph("Weight", styles["cell_bold"]),
-            _paragraph("Score", styles["cell_bold"]),
-            _paragraph("Weighted", styles["cell_bold"]),
-            _paragraph("Explanation", styles["cell_bold"]),
-        ]
+def _highlights_table(analysis: IPOAnalysis, styles: dict) -> Table:
+    columns = [
+        ("Strengths", analysis.strengths, _VERDICT_COLORS["Strong"]),
+        ("Risks", analysis.risks, _VERDICT_COLORS["Avoid"]),
+        ("Data gaps", analysis.data_gaps, _MUTED),
     ]
+    header = [_colored(title, styles["cell_bold"], color) for title, _, color in columns]
+    body = [
+        _bullets(values, styles["cell"]) if values else _p("None.", styles["cell"])
+        for _, values, _ in columns
+    ]
+    width = CONTENT_WIDTH / mm / 3
+    return _data_table([header, body], [width] * 3)
 
+
+def _factors_table(factors: list[ScoreFactor], styles: dict, total: float) -> Table:
+    data: list[list] = [[
+        _p(label, styles["th"]) for label in ("Factor", "Weight", "Score", "Weighted", "Explanation")
+    ]]
     for factor in factors:
-        data.append(
-            [
-                _paragraph(factor.label, styles["cell"]),
-                _paragraph(f"{factor.weight * 100:.0f}%", styles["cell"]),
-                _paragraph(f"{factor.score:.1f}", styles["cell"]),
-                _paragraph(f"{factor.weighted_score:.2f}", styles["cell"]),
-                _paragraph(factor.explanation, styles["cell"]),
-            ]
-        )
-
-    table = Table(
-        data,
-        colWidths=[24 * mm, 14 * mm, 13 * mm, 16 * mm, 91 * mm],
-        repeatRows=1,
-    )
-    table.setStyle(TableStyle(_base_table_style()))
-    return table
+        data.append([
+            _p(factor.label, styles["cell_bold"]),
+            _p(f"{factor.weight * 100:.0f}%", styles["cell"]),
+            _p(f"{factor.score:.1f}", styles["cell"]),
+            _p(f"{factor.weighted_score:.2f}", styles["cell"]),
+            _p(factor.explanation, styles["cell"]),
+        ])
+    data.append([
+        _p("Total", styles["cell_bold"]), _p("", styles["cell"]), _p("", styles["cell"]),
+        _p(f"{total:.1f}", styles["cell_bold"]), _p("out of 100", styles["cell"]),
+    ])
+    return _data_table(data, [30, 16, 16, 18, 98], total_row=True)
 
 
-def _checklist_table(
-    checklist: list[ChecklistItem],
-    styles: dict[str, ParagraphStyle],
-) -> Table:
-    data: list[list[Paragraph]] = [
-        [
-            _paragraph("Check", styles["cell_bold"]),
-            _paragraph("Status", styles["cell_bold"]),
-            _paragraph("Detail", styles["cell_bold"]),
-        ]
-    ]
-
+def _checklist_table(checklist: list[ChecklistItem], styles: dict) -> Table:
+    data: list[list] = [[_p(label, styles["th"]) for label in ("Check", "Status", "Detail")]]
     for item in checklist:
-        data.append(
-            [
-                _paragraph(item.label, styles["cell"]),
-                Paragraph(
-                    _safe(item.status.upper()),
-                    ParagraphStyle(
-                        "StatusCell",
-                        parent=styles["cell_bold"],
-                        textColor=_STATUS_COLORS.get(item.status, colors.black),
-                    ),
-                ),
-                _paragraph(item.detail, styles["cell"]),
-            ]
-        )
-
-    table = Table(
-        data,
-        colWidths=[34 * mm, 18 * mm, 106 * mm],
-        repeatRows=1,
-    )
-    table.setStyle(TableStyle(_base_table_style()))
-    return table
+        data.append([
+            _p(item.label, styles["cell_bold"]),
+            _colored(item.status.upper(), styles["cell_bold"],
+                     _STATUS_COLORS.get(item.status, _INK)),
+            _p(item.detail, styles["cell"]),
+        ])
+    return _data_table(data, [42, 20, 116])
 
 
-def _bullet_list(
-    heading: str,
-    values: list[str],
-    styles: dict[str, ParagraphStyle],
-) -> list:
-    story: list = [_paragraph(heading, styles["h2"])]
-    if not values:
-        story.append(_paragraph("None.", styles["body"]))
-        return story
-
-    for value in values:
-        story.append(_paragraph(f"- {value}", styles["body"]))
-    return story
-
-
-def _research_story(
-    digest: ResearchDigest | None,
-    styles: dict[str, ParagraphStyle],
-) -> list:
+def _research_story(digest: ResearchDigest | None, styles: dict) -> list:
     story: list = [
-        _paragraph("AI research (beside the rule-based score)", styles["h2"])
+        _p("AI research", styles["h2"]),
+        _p("Shown beside the rule-based score, never instead of it.", styles["small"]),
+        Spacer(1, 2 * mm),
     ]
     if digest is None or not digest.has_result:
         note = digest.note if digest is not None else None
-        story.append(_paragraph(note or "No AI research yet.", styles["body"]))
+        story.append(_p(note or "No AI research yet.", styles["body"]))
         return story
 
-    story.append(
-        Paragraph(
-            _safe(f"AI verdict: {research_headline(digest)}"),
-            ParagraphStyle(
-                "AIVerdict",
-                parent=styles["verdict"],
-                textColor=_VERDICT_COLORS.get(digest.verdict or "", colors.black),
-            ),
-        )
-    )
     if digest.conclusion:
-        story.append(_paragraph(digest.conclusion, styles["body"]))
-    for label, values in (("Strengths", digest.strengths), ("Risks", digest.risks)):
-        if values:
-            story.append(_paragraph(f"{label}:", styles["cell_bold"]))
-            for value in values[:3]:
-                story.append(_paragraph(f"- {value}", styles["body"]))
+        story.append(_p(digest.conclusion, styles["body"]))
+    columns = [
+        ("Strengths", digest.strengths[:3], _VERDICT_COLORS["Strong"]),
+        ("Risks", digest.risks[:3], _VERDICT_COLORS["Avoid"]),
+    ]
+    if any(values for _, values, _ in columns):
+        story.append(Spacer(1, 2 * mm))
+        header = [_colored(title, styles["cell_bold"], color) for title, _, color in columns]
+        body = [
+            _bullets(values, styles["cell"]) if values else _p("None.", styles["cell"])
+            for _, values, _ in columns
+        ]
+        half = CONTENT_WIDTH / mm / 2
+        story.append(_data_table([header, body], [half, half]))
     caveat = (
         f"Researched {format_research_time(digest.researched_at)}"
         f" (run #{digest.run_id}). Facts were gathered from the web and are "
@@ -392,7 +376,48 @@ def _research_story(
     )
     if digest.note:
         caveat = f"{digest.note} {caveat}"
-    story.append(_paragraph(caveat, styles["small"]))
+    story += [Spacer(1, 2 * mm), _p(caveat, styles["small"])]
+    return story
+
+
+def _link_paragraphs(link: SourceLink, styles: dict[str, ParagraphStyle]) -> list:
+    href = escape(link.url, {'"': "&quot;"})
+    label = f'<link href="{href}" color="{_LINK}">{_safe(link.label)}</link>'
+    if link.kind in {"official", "exchange"}:  # call out primary sources only
+        label += f' <font color="#667085" size="7">{_safe(link.kind.upper())}</font>'
+    url = f'<link href="{href}" color="#667085">{_safe(link.url)}</link>'
+    return [Paragraph(label, styles["link"]), Paragraph(url, styles["url"])]
+
+
+def _sources_story(
+    market: list[SourceLink],
+    digest: ResearchDigest | None,
+    styles: dict[str, ParagraphStyle],
+) -> list:
+    research = list(digest.sources) if digest is not None and digest.has_result else []
+    if not market and not research:
+        return []
+
+    story: list = [_p("Sources", styles["h2"])]
+    if market:
+        story.append(_p("Market data (GMP, price, dates, subscription)", styles["label"]))
+        story.append(Spacer(1, 1 * mm))
+        for link in market:
+            story.extend(_link_paragraphs(link, styles))
+    if research:
+        story.append(Spacer(1, 2 * mm))
+        story.append(_p(
+            f"Web sources cited by AI research ({len(research)}, run #{digest.run_id})",
+            styles["label"],
+        ))
+        story.append(Spacer(1, 1 * mm))
+        for link in research[:MAX_RESEARCH_SOURCES]:
+            story.extend(_link_paragraphs(link, styles))
+        hidden = len(research) - MAX_RESEARCH_SOURCES
+        if hidden > 0:
+            story.append(_p(
+                f"+ {hidden} more; see the IPO's AI research tab in the app.", styles["small"]
+            ))
     return story
 
 
@@ -400,40 +425,58 @@ def _analysis_story(
     analysis: IPOAnalysis,
     styles: dict[str, ParagraphStyle],
     research: Mapping[int, ResearchDigest] | None = None,
+    sources: Mapping[int, list[SourceLink]] | None = None,
 ) -> list:
-    story: list = []
-
-    heading = Paragraph(
-        _safe(
-            f"{analysis.name} -- {analysis.verdict} "
-            f"({analysis.score:.1f}/100)"
-        ),
-        ParagraphStyle(
-            "AnalysisHeading",
-            parent=styles["h2"],
-            textColor=_VERDICT_COLORS.get(analysis.verdict, colors.black),
-        ),
-    )
-    story.append(KeepTogether([heading, Spacer(1, 2 * mm), _meta_table(analysis, styles)]))
-    story.append(Spacer(1, 3 * mm))
-
+    digest = (research or {}).get(analysis.ipo_id)
+    story: list = [
+        _p(analysis.name, styles["ipo"]),
+        Spacer(1, 4 * mm),
+        _verdict_tiles(analysis, digest, styles, research is not None),
+        Spacer(1, 3 * mm),
+        _metric_grid(analysis, styles),
+        _p("Rule-based view", styles["h2"]),
+        _highlights_table(analysis, styles),
+    ]
     if research is not None:
-        story.extend(_research_story(research.get(analysis.ipo_id), styles))
-        story.append(Spacer(1, 3 * mm))
-
-    story.append(_paragraph("Score breakdown", styles["h2"]))
-    story.append(_factors_table(analysis.factors, styles))
-    story.append(Spacer(1, 3 * mm))
-
-    story.append(_paragraph("Checklist", styles["h2"]))
-    story.append(_checklist_table(analysis.checklist, styles))
-    story.append(Spacer(1, 3 * mm))
-
-    story.extend(_bullet_list("Strengths", analysis.strengths, styles))
-    story.extend(_bullet_list("Risks", analysis.risks, styles))
-    story.extend(_bullet_list("Data gaps", analysis.data_gaps, styles))
-
+        story.extend(_research_story(digest, styles))
+    story += [
+        _p("Score breakdown", styles["h2"]),
+        _factors_table(analysis.factors, styles, analysis.score),
+        _p("Checklist", styles["h2"]),
+        _checklist_table(analysis.checklist, styles),
+    ]
+    story.extend(
+        _sources_story(list((sources or {}).get(analysis.ipo_id, [])), digest, styles)
+    )
     return story
+
+
+def _page_decorator(title: str, moment: datetime):
+    """Header (title, date) and footer (disclaimer, page number) on every page."""
+
+    def draw(canvas, document) -> None:
+        canvas.saveState()
+        canvas.setFillColor(_BRAND)
+        canvas.rect(0, PAGE_HEIGHT - 3 * mm, PAGE_WIDTH, 3 * mm, stroke=0, fill=1)
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.setFillColor(_INK)
+        canvas.drawString(MARGIN, PAGE_HEIGHT - 10 * mm, title)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_MUTED)
+        canvas.drawRightString(
+            PAGE_WIDTH - MARGIN, PAGE_HEIGHT - 10 * mm, moment.strftime("%d %b %Y, %H:%M IST")
+        )
+        canvas.setStrokeColor(_BORDER)
+        canvas.setLineWidth(0.5)
+        canvas.line(MARGIN, 12 * mm, PAGE_WIDTH - MARGIN, 12 * mm)
+        canvas.setFont("Helvetica", 7)
+        canvas.drawString(
+            MARGIN, 8 * mm, "Personal research, not investment advice. GMP is unofficial."
+        )
+        canvas.drawRightString(PAGE_WIDTH - MARGIN, 8 * mm, f"Page {document.page}")
+        canvas.restoreState()
+
+    return draw
 
 
 def generate_report(
@@ -445,11 +488,14 @@ def generate_report(
     include_upcoming: bool = False,
     generated_at: datetime | None = None,
     research: Mapping[int, ResearchDigest] | None = None,
+    sources: Mapping[int, list[SourceLink]] | None = None,
 ) -> Path:
     """Write a PDF report and return its path.
 
     ``research`` (from :mod:`src.research.digest`) adds an AI view column and
-    an "AI research" block per IPO.
+    an "AI research" block per IPO. ``sources`` (from
+    :func:`src.reporting.sources.collect_sources`) lists the market-data pages
+    per IPO; research sources come from the digests.
 
     When ``output_path`` is omitted, the file is written to
     ``REPORT_OUTPUT_DIR`` with a timestamped name.
@@ -468,69 +514,63 @@ def generate_report(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     styles = _styles()
+    subtitle = f"Generated {moment.strftime('%d %b %Y, %H:%M IST')}"
+    if min_gmp_percent is not None:
+        subtitle += (
+            f"  ·  Screen: latest GMP at least {min_gmp_percent:g}%, upcoming IPOs "
+            f"{'included' if include_upcoming else 'excluded'}"
+        )
     story: list = [
-        _paragraph(title, styles["title"]),
-        _paragraph(
-            f"Generated: {moment.strftime('%d %b %Y, %H:%M IST')}",
-            styles["subtitle"],
-        ),
+        _p(title, styles["title"]),
+        Spacer(1, 1 * mm),
+        _p(subtitle, styles["subtitle"]),
+        Spacer(1, 6 * mm),
     ]
 
-    if min_gmp_percent is not None:
-        story.append(
-            _paragraph(
-                f"Filter: latest GMP >= {min_gmp_percent:g}% "
-                f"| upcoming {'included' if include_upcoming else 'excluded'}",
-                styles["subtitle"],
-            )
-        )
-
-    story.append(Spacer(1, 6 * mm))
-
-    if not analyses:
-        story.append(
-            _paragraph(
-                "No IPOs matched the current criteria in this run.",
-                styles["body"],
-            )
-        )
-        story.append(
-            _paragraph(
-                "Run a scrape first, or lower the minimum GMP percentage.",
-                styles["small"],
-            )
-        )
-    else:
-        story.append(_paragraph("Summary", styles["h2"]))
-        story.append(_summary_table(analyses, styles, research))
-        story.append(Spacer(1, 4 * mm))
-
-        for index, analysis in enumerate(analyses):
-            if index:
-                story.append(Spacer(1, 8 * mm))
-            story.extend(_analysis_story(analysis, styles, research))
-
-    story.append(Spacer(1, 8 * mm))
-    story.append(
-        _paragraph(
-            "Grey-market premium is unofficial, speculative and can vanish "
-            "before listing. This report is for personal research and is not "
-            "investment advice. Always verify with the official RHP and the "
-            "NSE/BSE filings.",
-            styles["small"],
-        )
+    disclaimer = _p(
+        "Grey-market premium is unofficial, speculative and can vanish "
+        "before listing. This report is for personal research and is not "
+        "investment advice. Always verify with the official RHP and the "
+        "NSE/BSE filings.",
+        styles["small"],
     )
+    if not analyses:
+        story += [
+            _p("No IPOs matched the current criteria in this run.", styles["body"]),
+            _p("Run a scrape first, or lower the minimum GMP percentage.", styles["small"]),
+            Spacer(1, 6 * mm),
+            disclaimer,
+        ]
+    else:
+        story += [
+            _count_tiles(analyses, styles),
+            _p("Summary", styles["h2"]),
+            _summary_table(analyses, styles, research),
+            Spacer(1, 3 * mm),
+            _p(
+                "Each IPO has its own page with the score breakdown, checklist, "
+                + ("AI research " if research is not None else "")
+                + "and sources.",
+                styles["small"],
+            ),
+            Spacer(1, 6 * mm),
+            disclaimer,
+        ]
+        for analysis in analyses:
+            story.append(PageBreak())
+            story.extend(_analysis_story(analysis, styles, research, sources))
 
     document = SimpleDocTemplate(
         str(destination),
         pagesize=A4,
-        leftMargin=16 * mm,
-        rightMargin=16 * mm,
-        topMargin=15 * mm,
-        bottomMargin=15 * mm,
+        leftMargin=MARGIN,
+        rightMargin=MARGIN,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
         title=title,
         author="IPO Checker",
     )
-    document.build(story)
+    decorate = _page_decorator(title, moment)
+    document.build(story, onFirstPage=decorate, onLaterPages=decorate)
 
     return destination

@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 
+import { currentEmail } from "@/auth";
 import { Chat } from "@/components/chat/chat";
+import { SignInButton } from "@/components/shell/user-menu";
 import { PageHeader } from "@/components/shell/page-header";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { api } from "@/lib/api";
@@ -19,6 +21,17 @@ export const metadata: Metadata = {
 
 /** Starter questions built from the IPOs currently in the database. */
 async function ChatWithSuggestions() {
+  if (!(await currentEmail())) {
+    return (
+      <div className="space-y-3 px-4 pb-6 sm:px-6">
+        <p className="text-sm leading-6 text-muted-foreground">
+          Chat answers can use the AI provider, so it is for signed-in users.
+        </p>
+        <SignInButton />
+      </div>
+    );
+  }
+
   const page = await api
     .listIpos({ sort: "gmp_percent", order: "desc", limit: 4 })
     .catch(() => null);
@@ -50,7 +63,7 @@ export default function ChatPage() {
               description="Streamed, grounded answers."
             />
             <CardContent className="p-0 pt-4">
-              <Suspense fallback={<Chat initialConversationId={null} />}>
+              <Suspense fallback={null}>
                 <ChatWithSuggestions />
               </Suspense>
             </CardContent>

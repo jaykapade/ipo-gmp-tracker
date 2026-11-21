@@ -18,6 +18,7 @@ from src.utils.parsing import (
     IST,
     derive_status_from_dates,
     is_open_status,
+    today_ist,
 )
 
 # One instance per source. They create their HTTP session lazily, so importing
@@ -141,6 +142,7 @@ def scrape_sources(
 
         results.append(result)
 
+    db.close_ended_ipos(today_ist().isoformat(), db_path=db_path)
     return results
 
 

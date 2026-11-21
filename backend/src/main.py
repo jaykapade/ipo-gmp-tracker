@@ -12,6 +12,8 @@ Examples::
     python -m src.main run --research --email      # the scheduled job
     python -m src.main research 12
     python -m src.main research --all-open
+    python -m src.main notify --dry-run            # daily digest to subscribers
+    python -m src.main notify --research           # ...the full research report instead
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ from src.pipeline import (
     summarise_scrape,
 )
 from src.reporting import build_text_summary, generate_report, send_email
+from src.reporting.email_html import build_html_summary
+from src.reporting.sources import collect_sources
 
 logger = logging.getLogger(__name__)
 
@@ -97,36 +101,51 @@ def _research_screened(args: argparse.Namespace, run: AnalysisRun) -> dict | Non
     )
 
 
+def _write_report(
+    run: AnalysisRun,
+    research: dict | None,
+    *,
+    output: str | None,
+    db_path: str | None,
+):
+    """Write the PDF; return ``(path, text, html(unsubscribe_url=None))`` for the email."""
+
+    sources = collect_sources([analysis.ipo_id for analysis in run.analyses], db_path=db_path)
+    summary = {
+        "min_gmp_percent": run.min_gmp_percent,
+        "include_upcoming": run.include_upcoming,
+        "generated_at": run.generated_at,
+        "research": research,
+        "sources": sources,
+    }
+    path = generate_report(run.analyses, output_path=output, **summary)
+    print(f"Report written: {path}")
+    text = build_text_summary(run.analyses, **summary)
+    return path, text, lambda unsubscribe_url=None: build_html_summary(
+        run.analyses, unsubscribe_url=unsubscribe_url, **summary
+    )
+
+
+def _report_subject(run: AnalysisRun) -> str:
+    return f"IPO report: {len(run.analyses)} candidate(s)"
+
+
 def _report_and_maybe_email(
     args: argparse.Namespace,
     run: AnalysisRun,
     research: dict | None = None,
 ) -> None:
-    path = generate_report(
-        run.analyses,
-        output_path=args.output,
-        min_gmp_percent=run.min_gmp_percent,
-        include_upcoming=run.include_upcoming,
-        generated_at=run.generated_at,
-        research=research,
-    )
-    print(f"Report written: {path}")
+    path, body, html = _write_report(run, research, output=args.output, db_path=args.db_path)
 
     if not args.email:
         if args.dry_run:
             print("--dry-run has no effect without --email.")
         return
 
-    body = build_text_summary(
-        run.analyses,
-        min_gmp_percent=run.min_gmp_percent,
-        include_upcoming=run.include_upcoming,
-        generated_at=run.generated_at,
-        research=research,
-    )
     result = send_email(
-        subject=f"IPO report: {len(run.analyses)} candidate(s)",
+        subject=_report_subject(run),
         body=body,
+        html=html(),
         attachments=[path],
         dry_run=args.dry_run,
     )
@@ -249,6 +268,52 @@ def _cmd_research(args: argparse.Namespace) -> int:
             print(f"  note: {note}")
 
     return 1 if failures else 0
+
+
+def _cmd_notify(args: argparse.Namespace) -> int:
+    """Email confirmed subscribers the open-IPO digest, or with ``--research``
+    the same report and PDF as ``run --research --email`` (stored research only)."""
+
+    from src.reporting.subscribers import send_daily_digest, send_report
+
+    if args.research:
+        from src.database import db
+        from src.research.digest import stored_digests
+
+        run = analyze_pipeline(persist=False, db_path=args.db_path)
+        subscribers = len(db.list_confirmed_subscribers(db_path=args.db_path))
+        if not run.analyses or not subscribers:
+            logger.info(
+                "No research report sent: %d screened IPO(s), %d subscriber(s).",
+                len(run.analyses),
+                subscribers,
+            )
+            return 0
+        research = stored_digests([a.ipo_id for a in run.analyses], db_path=args.db_path)
+        path, text, html = _write_report(run, research, output=None, db_path=args.db_path)
+        result = send_report(
+            subject=_report_subject(run),
+            build=lambda url: (f"{text}\n\nUnsubscribe: {url}", html(url)),
+            count=len(run.analyses),
+            attachments=[path],
+            db_path=args.db_path,
+            dry_run=args.dry_run,
+        )
+        what = "research report"
+    else:
+        result = send_daily_digest(db_path=args.db_path, dry_run=args.dry_run)
+        what = "digest"
+    verb = "Would send" if args.dry_run else "Sent"
+    logger.info(
+        "%s the %s (%d IPOs) to %d of %d subscriber(s); %d failed.",
+        verb,
+        what,
+        result.open_ipos,
+        result.sent,
+        result.subscribers,
+        result.failed,
+    )
+    return 1 if result.failed else 0
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -403,6 +468,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     research.set_defaults(func=_cmd_research)
 
+    notify = subparsers.add_parser(
+        "notify",
+        help="Email today's open IPOs and GMP to confirmed subscribers.",
+    )
+    notify.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build every email without sending it.",
+    )
+    notify.add_argument(
+        "--research",
+        action=argparse.BooleanOptionalAction,
+        default=config.DIGEST_RESEARCH,
+        help="Send the full research report and PDF instead of the digest "
+        "(default: DIGEST_RESEARCH).",
+    )
+    notify.set_defaults(func=_cmd_notify)
+
     serve = subparsers.add_parser(
         "serve",
         help="Run the FastAPI service (read-only + token-protected actions).",
@@ -436,4 +519,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Windows writes redirected output as cp1252, which cannot encode "₹".
+    sys.stdout.reconfigure(encoding="utf-8")
     sys.exit(main())

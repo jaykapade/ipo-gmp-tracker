@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from src.database import db
+from src.reporting.sources import SourceLink, research_sources
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class ResearchDigest:
     researched_at: str | None = None
     run_id: int | None = None
     error: str | None = None
+    sources: list[SourceLink] = field(default_factory=list)
 
     @property
     def has_result(self) -> bool:
@@ -107,6 +109,7 @@ def _fill_from_run(digest: ResearchDigest, run: dict[str, Any] | None) -> Resear
     digest.disputes = len(disputes) if isinstance(disputes, list) else 0
     digest.researched_at = run.get("finished_at") or run.get("created_at")
     digest.run_id = run.get("id")
+    digest.sources = research_sources(outputs.get("facts"))
     return digest
 
 
@@ -150,6 +153,8 @@ def research_for_report(
     moment = now or datetime.now(UTC)
     max_age = timedelta(hours=max(0.0, max_age_hours))
     ai_on = bool(client is not None and client.for_role("analyst").enabled)
+    # Otherwise a run orphaned by a killed process blocks its IPO forever.
+    db.mark_stale_research_runs_failed(db_path=db_path)
 
     digests: dict[int, ResearchDigest] = {}
     for ipo_id in ipo_ids:

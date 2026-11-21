@@ -34,7 +34,9 @@ page and a streaming chat assistant. It talks only to the FastAPI backend in
 | Variable | Where it is used | Notes |
 | --- | --- | --- |
 | `NEXT_PUBLIC_API_BASE_URL` | browser + server | Backend URL, default `http://localhost:8000`. |
-| `API_TOKEN` | **server only** | Must equal `API_TOKEN` in the backend env. Used by `app/api/research/[id]/route.ts` to start AI research; never sent to the browser. |
+| `API_TOKEN` | **server only** | Must equal `API_TOKEN` in the backend env. Used by `lib/backend.ts`, `app/api/research/[id]/route.ts` and `app/api/chat/route.ts`; never sent to the browser. |
+| `AUTH_SECRET` | **server only** | Encrypts the sign-in cookie; any long random string (`npx auth secret`). |
+| `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` | **server only** | Google OAuth client (Google Cloud Console > Credentials > OAuth client ID, Web application) with redirect URI `http://localhost:3000/api/auth/callback/google`. |
 
 Restart `pnpm dev` after changing `.env.local`. If the API is unreachable,
 pages show a "backend not reachable" panel, and the header pill reads
@@ -51,6 +53,12 @@ If `node`/`pnpm` are not found in PowerShell (fnm users):
 | `/ipos/[id]` | **Overview** tab: GMP chart/history, issue details, sources, rule-based analysis. **AI research** tab: run research, live stage progress, H5 assessment beside the rule-based score, H1–H4 perspectives with citation chips, dispute log, cited evidence. |
 | `/reports` | Generated PDF reports, newest first. |
 | `/chat` | Streaming grounded chat with starter questions built from current IPOs. |
+| `/subscription` | Target of the unsubscribe link in subscriber emails: an **Unsubscribe** button (a button, so mail scanners opening the link change nothing). |
+
+Sign-in is Google only (Auth.js, `auth.ts`), with the session in an encrypted
+cookie and no user table. Chat, starting AI research and the daily email need
+it; browsing does not. Every page's footer turns the daily email on or off for
+the signed-in Google address (see the backend README, "Subscribers").
 
 ### Dashboard filters
 
@@ -70,11 +78,13 @@ so views can be bookmarked and every control also works without JavaScript.
 
 ### AI research tab
 
-"Run AI research" calls the local route handler, which adds the server-side
-`API_TOKEN` and queues a run on the backend. The tab polls every 3 seconds and
-shows each stage (gather → perspectives → verify → challenge → synthesis).
-While a re-run is in progress the last completed result stays visible. Runs
-continue on the server if you leave the page.
+"Run AI research" is only offered while the IPO has no completed research, so
+a run is never started by accident; fresh results for screened IPOs come from
+the scheduled `run --research`. The button calls the local route handler,
+which adds the server-side `API_TOKEN` and queues a run on the backend. The
+tab polls every 3 seconds and shows each stage (gather → perspectives →
+verify → challenge → synthesis). Runs continue on the server if you leave the
+page.
 
 The header pill shows the backend's AI provider ("Claude · subscription",
 "Ollama · local", "AI off"); hover it for per-role models.
@@ -99,6 +109,7 @@ frontend/
 │   ├── ipos/[id]/page.tsx        # IPO detail (tabs via ?tab=)
 │   ├── reports/page.tsx
 │   ├── chat/page.tsx
+│   ├── subscription/page.tsx     # unsubscribe from email links
 │   ├── api/research/[id]/route.ts  # token-adding proxy for AI research
 │   ├── layout.tsx, error.tsx, not-found.tsx
 ├── components/
@@ -107,11 +118,13 @@ frontend/
 │   ├── research/                 # research panel (client) + result views
 │   ├── chat/                     # streaming chat client
 │   ├── reports/
-│   ├── shell/                    # header, nav, AI status pill
+│   ├── shell/                    # header, nav, AI status pill, user menu, daily email
 │   └── ui/                       # badge, card, stat, skeleton, empty state
 └── lib/
     ├── api.ts                    # typed API client
     ├── dashboard-query.ts        # URL ⇄ filter state
+    ├── backend.ts                # token-protected backend calls (server only)
+    ├── subscriptions.ts          # Server Actions: daily email on/off, unsubscribe
     ├── types.ts                  # mirrors backend/src/api/schemas.py
     ├── format.ts                 # currency, percent, dates (IST), issue size
     └── utils.ts
@@ -121,7 +134,8 @@ frontend/
 
 - Types are copied by hand from the backend schemas (OpenAPI generation is
   planned).
-- No user accounts: the shared `API_TOKEN` is fine for localhost only.
+- Any Google account can sign in; there is no allow-list or per-user limit
+  on chat and research.
 - The table is hand-rolled; no virtualisation (fine for tens of IPOs).
 - AI research facts come from the web and are unverified until checked against
   the RHP; secondary sources are flagged in the evidence list.

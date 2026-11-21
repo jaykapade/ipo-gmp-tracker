@@ -8,10 +8,11 @@ the scrapers, and adds the query helpers the analysis layer needs
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1102,22 +1103,106 @@ def get_latest_research(
     return run
 
 
-def mark_stale_research_runs_failed(*, db_path: str | Path | None = None) -> int:
-    """Fail runs left queued/running by a previous process (e.g. a restart)."""
+# No real run lasts this long, so an older queued/running row was orphaned by a
+# killed process. Younger rows may belong to another live process (API or CLI).
+STALE_RESEARCH_RUN_HOURS = 2.0
+
+
+def mark_stale_research_runs_failed(
+    *,
+    older_than_hours: float = STALE_RESEARCH_RUN_HOURS,
+    db_path: str | Path | None = None,
+) -> int:
+    """Fail queued/running runs created more than ``older_than_hours`` ago."""
 
     ensure_schema(db_path)
+    cutoff = (datetime.now(UTC) - timedelta(hours=older_than_hours)).isoformat()
     with connect(db_path) as connection:
         cursor = connection.execute(
             """
             UPDATE research_runs
             SET status = 'failed',
-                error = COALESCE(error, 'interrupted: the API process restarted'),
+                error = COALESCE(error, 'interrupted: the process running it stopped'),
                 finished_at = ?
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'running') AND created_at < ?
             """,
-            (_now(),),
+            (_now(), cutoff),
         )
         return int(cursor.rowcount)
+
+
+def close_ended_ipos(today: str, *, db_path: str | Path | None = None) -> int:
+    """Mark ``open`` IPOs whose ISO close date is before ``today`` as closed.
+
+    Scrapers skip IPOs once they close, so nothing else updates their status.
+    """
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE ipos SET status = 'closed'
+            WHERE LOWER(TRIM(status)) = 'open' AND close_date < ?
+            """,
+            (today,),
+        )
+        return int(cursor.rowcount)
+
+
+# A pending address gets at most one confirmation email per this window, so the
+# public form cannot be used to flood someone's inbox.
+def set_subscribed(
+    email: str, subscribed: bool, *, db_path: str | Path | None = None
+) -> None:
+    """Turn the daily email on or off for a signed-in user's (verified) address."""
+
+    ensure_schema(db_path)
+    now = _now()
+    status = "confirmed" if subscribed else "unsubscribed"
+    with connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO subscribers (email, token, status, created_at, confirmed_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                status = excluded.status,
+                confirmed_at = COALESCE(subscribers.confirmed_at, excluded.confirmed_at)
+            """,
+            (email, secrets.token_urlsafe(32), status, now, now if subscribed else None),
+        )
+
+
+def is_subscribed(email: str, *, db_path: str | Path | None = None) -> bool:
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM subscribers WHERE email = ? AND status = 'confirmed'", (email,)
+        ).fetchone()
+    return row is not None
+
+
+def unsubscribe_token(token: str, *, db_path: str | Path | None = None) -> bool:
+    """Unsubscribe via the link in an email (no sign-in needed); False if unknown."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        cursor = connection.execute(
+            "UPDATE subscribers SET status = 'unsubscribed' WHERE token = ?", (token,)
+        )
+        return cursor.rowcount > 0
+
+
+def list_confirmed_subscribers(
+    *, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """Return ``email`` and ``token`` of every confirmed subscriber."""
+
+    ensure_schema(db_path)
+    with connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT email, token FROM subscribers WHERE status = 'confirmed' ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 if __name__ == "__main__":

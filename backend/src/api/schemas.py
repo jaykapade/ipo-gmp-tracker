@@ -176,3 +176,16 @@ class DuplicatePairOut(BaseModel):
     second_id: int
     second_name: str
     score: float
+
+
+class SubscriptionRequest(BaseModel):
+    email: str = Field(max_length=320)
+    subscribed: bool
+
+
+class UnsubscribeRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=100)
+
+
+class SubscriptionStatus(BaseModel):
+    subscribed: bool

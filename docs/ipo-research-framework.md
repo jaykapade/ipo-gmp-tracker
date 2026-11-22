@@ -1,1253 +1,401 @@
 # IPO Research Framework
 
-> **Purpose.** This is the research specification for the IPO Checker platform. It
-> defines what must be collected, calculated, verified and analysed before an
-> Indian IPO (NSE/BSE Mainboard or SME) can be assessed. It is a design document,
-> not investment advice.
->
-> **Design rule.** Deterministic code computes every number, threshold and score.
-> An LLM (local or cloud) may read documents and write narratives, but it never
-> invents a data point, changes a calculation, or overrides the 20% GMP filter.
-> All providers sit behind one interface, so switching is config-only.
->
-> **Status.** The provider-agnostic AI layer is implemented and committed
-> (`backend/src/llm/`: one `LLMProvider` contract, config-only switching,
-> local-first defaults; 191 offline tests, ruff clean). The local model stack
-> is pulled and GPU-verified — see [§P](#p-local-ai-stack-verified). The
-> prototype currently stores IPO identity, GMP history, issue pricing and a
-> lightweight deterministic analysis; the research tables, document pipeline,
-> financial engine and AI summaries are roadmap items tracked in
-> [§O](#o-implementation-roadmap).
+What to collect, calculate, verify and analyse before assessing an Indian IPO
+(NSE/BSE Mainboard or SME). A design spec, not investment advice.
+
+**Design rule.** Deterministic code computes every number, threshold and
+score. An LLM may read and write narratives but never invents a data point,
+changes a calculation or overrides the GMP screen. Providers sit behind one
+interface, so switching is config only.
+
+## Contents
+
+[A. Checklist](#a-research-checklist) ·
+[B. Data model](#b-data-model) ·
+[C. Formulas](#c-formulas) ·
+[D. Sources](#d-sources) ·
+[E. Document extraction](#e-document-extraction) ·
+[F. Mainboard](#f-mainboard-rules) ·
+[G. SME](#g-sme-rules) ·
+[H. AI summaries](#h-ai-summaries) ·
+[I. Detailed PDF](#i-detailed-pdf) ·
+[J. Summary PDF](#j-summary-pdf) ·
+[K. Workflow](#k-workflow-and-gates) ·
+[L. Data quality](#l-data-quality) ·
+[M. Scoring](#m-scoring) ·
+[N. Extra categories](#n-extra-categories) ·
+[O. Roadmap](#o-roadmap) ·
+[P. AI stack](#p-ai-stack)
 
 ---
 
-## Table of contents
+## A. Research checklist
 
-- [A. Complete research checklist](#a-complete-research-checklist)
-- [B. Required data fields and database structure](#b-required-data-fields-and-database-structure)
-- [C. Financial formulas and calculations](#c-financial-formulas-and-calculations)
-- [D. Official and secondary data sources](#d-official-and-secondary-data-sources)
-- [E. Document extraction requirements](#e-document-extraction-requirements)
-- [F. Mainboard-specific research requirements](#f-mainboard-specific-research-requirements)
-- [G. SME-specific research requirements](#g-sme-specific-research-requirements)
-- [H. Five AI summary specifications](#h-five-ai-summary-specifications)
-- [I. Detailed PDF report structure](#i-detailed-pdf-report-structure)
-- [J. Summary PDF report structure](#j-summary-pdf-report-structure)
-- [K. Automated research and verification workflow](#k-automated-research-and-verification-workflow)
-- [L. Missing information and data-quality handling](#l-missing-information-and-data-quality-handling)
-- [M. Recommended scoring framework](#m-recommended-scoring-framework)
-- [N. Additional research categories](#n-additional-research-categories)
-- [O. Implementation roadmap](#o-implementation-roadmap)
-- [P. Local AI stack (verified)](#p-local-ai-stack-verified)
+Every item carries provenance (source, document, period, page, retrieval
+date) and a status: `reported`, `calculated`, `estimated`, `unverified` or
+`missing`. Never guess.
 
----
+- **A1. Issue** — legal name, CIN, segment (NSE/BSE, Emerge/SME), fresh vs
+  OFS, timetable (open/close/allotment/refund/listing), price band, face
+  value, lot size, min retail amount, issue size, pre/post shares and
+  shareholding, promoter dilution, intermediaries (registrar, lead managers,
+  market maker), anchors and lock-ins, objects of the issue, IPO grade, RHP
+  links.
+- **A2. Business** — model and segments, products, customers and
+  concentration (top 1/5/10), suppliers, geography, capacity and
+  utilisation, distribution, moat, market share, order book, scalability,
+  key-person dependence, IP, group structure, related parties, employees,
+  seasonality, ESG.
+- **A3. Financials** (3–5 years, 4–8 quarters, consolidated preferred) —
+  full P&L, balance sheet and cash flow; ratios (ROE, ROCE, ROA, D/E, net
+  debt/EBITDA, current/quick, interest cover, turnover and days, CCC,
+  EPS/BVPS); growth and margin trends; earnings quality (OCF/EBITDA,
+  OCF/PAT); auditor remarks, restatements, policy changes, related-party
+  flows, aggressive capitalisation, rising receivables.
+- **A4. Promoters and management** — backgrounds, track record, other
+  directorships, past failures, litigation, SEBI/MCA/RBI action, pledges,
+  governance and board independence, auditor tenure/changes, remuneration,
+  pre-IPO selling, ESOP dilution, succession.
+- **A5. Valuation** — market cap and EV at the upper band, pre/post P/E, P/B,
+  EV/EBITDA, EV/Sales, earnings yield, dilution, OFS %, peer and industry
+  multiples, premium/discount, recent comparable listings; verdict
+  attractive/fair/expensive.
+- **A6. Industry** — TAM/SAM and CAGR, drivers, cyclicality, margins,
+  structure, competitors, entry barriers, regulation, disruption,
+  FX/commodity exposure, policy (PLI, subsidies, tax).
+- **A7. GMP and sentiment** (max five GMP sources) — GMP history and %,
+  kostak and subject-to-sauda where reliable, subscription by category and
+  day, anchor demand, listing performance. Keep sentiment separate from
+  fundamentals.
+- **A8. Legal and risk** — SEBI observations, material litigation, tax
+  disputes, contingent liabilities, compliance, licences, related-party and
+  dependency risks, cyber/privacy, insurance; ranked red-flag synthesis.
+- **A9. SME** — see [§G](#g-sme-rules).
+- **A10. Post-listing** — listing gain, price performance, results vs
+  projections, promoter/pledge changes, lock-in expiries, use of proceeds,
+  and whether the verdict predicted the outcome.
 
-## A. Complete research checklist
+## B. Data model
 
-Every item below must carry provenance (source, document, period, page, retrieval
-date) and a data-quality status: `reported`, `calculated`, `estimated`,
-`unverified` or `missing`. An item that cannot be sourced is marked `missing`,
-never guessed.
+### B1. Principles
 
-### A1. IPO information and background
+1. One canonical `ipos` row plus per-source provenance (`ipo_sources`);
+   record conflicts, never overwrite silently.
+2. Financial facts belong to a period and basis (standalone/consolidated,
+   audited or not).
+3. Every fact links to a citation (document, page, quote, retrieval time).
+4. Derived values store their formula version and inputs.
+5. AI output lives in `ai_outputs` and never overwrites facts.
+6. Keep history (`created_at`/`updated_at`, snapshots) for backtesting.
 
-- [ ] Company legal name, brand name, CIN, incorporation date, registered office.
-- [ ] Mainboard vs SME classification and the exact exchange/segment
-      (NSE, BSE, NSE Emerge, BSE SME).
-- [ ] IPO type: fresh issue, offer for sale, or a mix.
-- [ ] Opening date, closing date, allotment date, refund date, listing date.
-- [ ] Price band (lower/upper), issue price, face value, lot size, minimum
-      retail application amount.
-- [ ] Issue size (₹ crore and share count), fresh issue shares, OFS shares.
-- [ ] Pre-issue and post-issue paid-up capital and share count.
-- [ ] Pre-issue and post-issue shareholding pattern (promoter, promoter group,
-      public, institutions, employees).
-- [ ] Promoter holding before/after, dilution, any promoter selling in the OFS.
-- [ ] Registrar, lead managers, underwriters, market maker (SME), legal counsel,
-      statutory auditor, monitoring agency.
-- [ ] Anchor investor allocation, anchor lock-in, other lock-ins.
-- [ ] Objects of the issue and the amount allocated to each object.
-- [ ] Use of proceeds vs historical capex/working-capital norms.
-- [ ] IPO grade from a SEBI-registered credit-rating agency, where available.
-- [ ] RHP/DRHP/prospectus URLs and filing dates.
+### B2. Tables
 
-### A2. Company and business research
+Existing: `ipos`, `gmp_history`, `ipo_sources`, `scrape_runs`,
+`analysis_reports`, `research_runs`, `ai_outputs`, `subscribers`,
+`schema_migrations`.
 
-- [ ] Business model and revenue streams, with segment split.
-- [ ] Products/services and their stage of maturity.
-- [ ] Customer segments (B2B, B2C, government, export) and contract types.
-- [ ] Geographic presence and revenue by geography.
-- [ ] Manufacturing/operational capacity, utilisation, expansion plans.
-- [ ] Distribution network, dealers, branches, warehouses, service centres.
-- [ ] Competitive advantages and their durability.
-- [ ] Industry position and estimated market share.
-- [ ] Customer concentration (top 1/5/10 customers as % of revenue).
-- [ ] Supplier concentration and single-source dependencies.
-- [ ] Order book, pipeline, long-term contracts, repeat revenue.
-- [ ] Business scalability and operating leverage.
-- [ ] Dependence on key individuals, promoters or a small technical team.
-- [ ] Intellectual property, patents, trademarks, licences, technology stack.
-- [ ] Subsidiaries, associates, joint ventures and group structure.
-- [ ] Related-party transactions and their share of revenue/expenses.
-- [ ] Employee count, attrition, union/labour exposure.
-- [ ] Seasonality and working-capital intensity of the business model.
-- [ ] ESG exposure: emissions, water, waste, safety, community, governance.
+Planned:
 
-### A3. Complete financial analysis
+| Table | Holds |
+| --- | --- |
+| `companies` | Legal entity, CIN, incorporation, group |
+| `ipo_issue`, `issue_objects` | Issue structure, intermediaries, objects and amounts |
+| `shareholding` | Pre/post ownership by category, pledges |
+| `financial_periods`, `financial_facts`, `financial_ratios` | Periodised statements and derived ratios (`formula_version`, `inputs_json`) |
+| `subscription_snapshots` | Demand by category and day |
+| `peers`, `industry_metrics` | Comparables and market context |
+| `documents`, `document_chunks` | RHP/DRHP files (`sha256`) and embedded chunks |
+| `source_citations` | Per-fact provenance and quality state |
+| `research_findings` | Litigation, governance, risk findings with severity |
+| `post_listing_prices` | OHLCV after listing |
+| `email_log`, `review_queue`, `chat_sessions`/`chat_messages` | Delivery audit, human review, chat history |
 
-Collect 3–5 financial years and, where available, 4–8 quarters. Prefer
-consolidated statements; keep standalone separately if both exist.
+Extend `gmp_history` with `kostak`, `subject_to_sauda`, `scrape_run_id`, and
+`analysis_reports` with `model_version`, `inputs_hash`, `data_completeness`.
 
-**Income statement**
+### B3. Conventions
 
-- [ ] Revenue from operations, other income, total income.
-- [ ] Cost of goods sold / cost of materials / purchases.
-- [ ] Employee benefit expense.
-- [ ] Other expenses.
-- [ ] EBITDA, EBIT, finance costs, depreciation and amortisation.
-- [ ] Exceptional/extraordinary items and their nature.
-- [ ] Profit before tax, tax expense, effective tax rate, PAT.
-- [ ] EPS (basic and diluted), dividend per share.
+Money in ₹ crore (unit stored); percentages as points (`12.5`); ISO-8601
+dates, UTC timestamps; FY as `YYYY-YY`; shares as counts. Null is unknown,
+`0` is a real zero.
 
-**Balance sheet**
+## C. Formulas
 
-- [ ] Total assets, total liabilities, total equity.
-- [ ] Current assets: cash, receivables, inventory, loans/advances, other.
-- [ ] Current liabilities: payables, short-term borrowings, provisions, other.
-- [ ] Long-term borrowings, lease liabilities, deferred tax.
-- [ ] Net worth, reserves and surplus.
-- [ ] Intangible assets, goodwill, capital work in progress.
-- [ ] Contingent liabilities and commitments.
-- [ ] Off-balance-sheet items, guarantees, letters of comfort.
-- [ ] Share capital, preference shares, warrants, convertible instruments.
+Implement once, unit-test, version. Division by zero returns `None` with a
+reason.
 
-**Cash flow**
+| Group | Metrics |
+| --- | --- |
+| Growth | YoY/QoQ `(v_t / v_{t-1} - 1) × 100`; CAGR `(end/start)^(1/n) - 1` |
+| Profitability | Gross margin; EBITDA = `PBT + finance costs + D&A`; EBIT = `PBT + finance costs`; EBITDA/EBIT/PAT margins; tax rate `tax / PBT`; EPS `PAT / weighted shares`; post-issue EPS `PAT / post-issue shares` |
+| Returns | ROE `PAT / avg equity`; ROCE `EBIT / avg capital employed`; ROA `PAT / avg assets` |
+| Leverage | D/E; net debt `debt - cash`; net debt/EBITDA; current and quick ratio; interest cover `EBIT / finance costs` |
+| Efficiency | Asset turnover; DIO, DSO, DPO; CCC `DIO + DSO - DPO`; capex intensity |
+| Cash flow | FCF `OCF - capex`; OCF/EBITDA; OCF/PAT; FCF yield |
+| Valuation | Mcap `issue price × post shares`; EV `mcap + debt - cash`; P/E; P/B; EV/EBITDA; EV/Sales; earnings yield; dilution `(post - pre) / post`; OFS %; peer premium `(multiple / peer median - 1) × 100` |
+| GMP and demand | GMP % `GMP / issue price × 100`; trend over 7–14 days (Rising/Stable/Falling); source spread; subscription `bid / offered` |
 
-- [ ] Operating cash flow (OCF), investing cash flow, financing cash flow.
-- [ ] Capex (tangible and intangible), free cash flow.
-- [ ] OCF/EBITDA and OCF/PAT (earnings-quality checks).
-- [ ] Working-capital movement and its drivers.
-- [ ] Receivables and inventory trends vs revenue.
-- [ ] Dividends, buybacks, debt repayment, equity raised.
+Rules: use average balances when two period ends exist (else closing value,
+marked `estimated`); never mix standalone/consolidated or annual/quarterly;
+recompute after restatements; round only for display.
 
-**Ratios and quality checks**
+## D. Sources
 
-- [ ] ROE, ROCE, ROA.
-- [ ] Debt/equity, net debt/EBITDA, current ratio, quick ratio.
-- [ ] Interest coverage.
-- [ ] Asset turnover, inventory turnover, receivables turnover, payables days.
-- [ ] Cash conversion cycle.
-- [ ] EPS, book value per share, post-issue EPS and BVPS.
-- [ ] Revenue/EBITDA/PAT growth (YoY, QoQ, 3-year CAGR).
-- [ ] Margin trend and its drivers.
-- [ ] Related-party revenue/expense share.
-- [ ] Auditor qualifications, emphasis of matter, restatements.
-- [ ] Accounting-policy changes, revenue-recognition concerns.
-- [ ] Related-party loans, round-tripping indicators, evergreening.
-- [ ] Aggressive capitalisation, low cash conversion, rising receivables.
+Priority: **SEBI filings** (DRHP/RHP) → **NSE/BSE** disclosures → **MCA** →
+company annual reports → official industry/government data → reputable data
+providers → news (context only, never the sole source for a hard fact). GMP:
+up to five unofficial sources (InvestorGain, IPO Watch, Chittorgarh, IPO
+Central, Moneycontrol).
 
-### A4. Promoter and management investigation
+Rules: prefer the primary document; record URL, dates and page; no CAPTCHA,
+paywall or anti-bot bypass; respect robots.txt and rate limits; keep a hashed
+raw copy; store both values when official sources disagree.
 
-- [ ] Promoter names, backgrounds, education, track record.
-- [ ] Directors, KMP, CFO, company secretary, independent directors.
-- [ ] Other directorships and previous companies.
-- [ ] Previous business failures, insolvency, strikes-off, defaults.
-- [ ] Litigation: civil, criminal, tax, regulatory, consumer, labour.
-- [ ] SEBI orders, MCA action, RBI/other regulator action.
-- [ ] Promoter shareholding, pledge, encumbrance, non-disposal undertakings.
-- [ ] Related-party transactions and conflicts of interest.
-- [ ] Corporate-governance structure, board independence, committees.
-- [ ] Auditor identity, tenure, changes, qualifications, resignation.
-- [ ] Management remuneration and related-party compensation.
-- [ ] Insider selling, pre-IPO placement, warrants, ESOP dilution.
-- [ ] Succession planning and key-person risk.
+## E. Document extraction
 
-### A5. IPO valuation
+- **Ingest:** discover the RHP from NSE/BSE/SEBI, download with retries and a
+  size cap, store `sha256`; parse with Docling (MinerU fallback, OCR only for
+  scanned pages); chunk ~800–1200 tokens with 10–15% overlap and page spans;
+  embed locally (`qwen3-embedding:0.6b`).
+- **Targets:** issue structure, business, financials, risk factors,
+  litigation, promoters, related parties, governance, industry, use of
+  proceeds.
+- **Rules:** parsing is deterministic, never an LLM; the LLM only reads
+  pre-extracted prose and returns schema-validated JSON with a page and a
+  verbatim quote; reject if the quote is not on that page; diff against
+  previous extractions; document text is never instructions; low-confidence
+  results go to `review_queue`.
 
-- [ ] Issue market capitalisation at the upper band.
-- [ ] Enterprise value at the upper band.
-- [ ] Post-issue P/E (and pre-issue P/E).
-- [ ] Price-to-book (post-issue).
-- [ ] EV/EBITDA and EV/Sales.
-- [ ] Earnings yield.
-- [ ] Dilution and post-issue ownership.
-- [ ] OFS percentage of the issue.
-- [ ] Listed comparable companies and their multiples.
-- [ ] Industry median/quartile multiples.
-- [ ] Valuation premium/discount vs peers.
-- [ ] Implied valuation at lower band and at listing price.
-- [ ] Valuation vs recent comparable listings and their after-listing performance.
-- [ ] Verdict: attractively priced / fair / expensive, with reasoning.
+## F. Mainboard rules
 
-### A6. Industry and competitor research
+Higher bar on governance, disclosure, institutional demand and valuation:
+SEBI track-record norms, group structure, QIB/anchor demand, free float,
+dividend and capital-allocation history, approvals and land titles, peer sets
+by size. Default thresholds (configurable): ≥ 3 audited years; positive OCF
+in 2 of the last 3 years; interest cover ≥ 2x; D/E ≤ 2x (non-financial);
+flag peer premium above +30%, fail above +60%.
 
-- [ ] Total addressable market (TAM), serviceable market (SAM), CAGR.
-- [ ] Industry growth drivers and cyclicality.
-- [ ] Industry profitability and margin structure.
-- [ ] Market structure, fragmentation, consolidation.
-- [ ] Major competitors, listed and unlisted.
-- [ ] Company market share and ranking.
-- [ ] Competitive advantages and entry barriers.
-- [ ] Regulatory environment and pending regulation.
-- [ ] Technology disruption and substitution risk.
-- [ ] Domestic and export demand.
-- [ ] Import/export dependence, currency exposure, commodity exposure.
-- [ ] Government policy, subsidies, PLI, taxation.
+## G. SME rules
 
-### A7. GMP and market sentiment (maximum five GMP sources)
+Never apply mainboard thresholds blindly; SME risk is scale, liquidity,
+concentration and governance. Check market maker (identity, inventory, track
+record), free float and spreads, promoter dependency, working capital,
+disclosure quality, manipulation signals (circular trading, pump-and-dump),
+migration path. Defaults: positive OCF in the latest year; D/E flag above 1x,
+cap 1.5x; free float below 25% flagged; GMP weighted lower than for
+mainboard; every report gets an "SME risk" block.
 
-- [ ] GMP history and daily changes.
-- [ ] GMP absolute and GMP %.
-- [ ] Kostak rate, where reliably available.
-- [ ] Subject-to-sauda rate, where reliably available.
-- [ ] Retail subscription (times and amount).
-- [ ] NII subscription (small and big NII where available).
-- [ ] QIB subscription.
-- [ ] Employee and shareholder quota subscription.
-- [ ] Overall subscription and day-wise subscription trend.
-- [ ] Anchor investor participation and lock-in.
-- [ ] Institutional demand signals.
-- [ ] Listing price, listing gain/loss, post-listing performance.
-- [ ] Explicit separation of sentiment from fundamentals.
+## H. AI summaries
 
-### A8. Regulatory, legal and risk research
+Five perspectives, each with `evidence`, `conclusion`, `confidence`
+(with reason), `missing_information`, `citations` and `data_as_of`:
 
-- [ ] SEBI observations, clarifications and pending proceedings.
-- [ ] Material litigation and its financial exposure.
-- [ ] Tax disputes and contingent liabilities.
-- [ ] Environmental, safety and operational compliance.
-- [ ] Pending investigations and show-cause notices.
-- [ ] Licences, approvals, permits and their renewal risk.
-- [ ] Related-party and group-company risks.
-- [ ] Customer/supplier dependency risks.
-- [ ] Industry-specific regulation.
-- [ ] Business-continuity, disaster-recovery and cyber risk.
-- [ ] Insurance coverage adequacy.
-- [ ] Data privacy and information-security exposure.
-- [ ] Key-person and succession risk.
-- [ ] Litigation against promoters/directors.
-- [ ] Red-flag synthesis and severity.
-
-### A9. SME-specific investigation
-
-- [ ] Operating scale and limited financial history.
-- [ ] Liquidity and low free float.
-- [ ] Market-maker arrangement, inventory and obligations.
-- [ ] Shareholder concentration and promoter dependency.
-- [ ] Working-capital and cash-flow risks.
-- [ ] Corporate-governance quality and board independence.
-- [ ] Trading restrictions and SME exchange rules.
-- [ ] Valuation risk: SME multiples vs mainboard peers.
-- [ ] Price manipulation, circular trading, pump-and-dump indicators.
-- [ ] Migration path to mainboard, if stated.
-- [ ] Disclosure quality and RHP completeness.
-- [ ] Post-listing volatility and exit liquidity.
-
-### A10. Post-listing tracking
-
-- [ ] Issue price, listing price, listing gain/loss.
-- [ ] Daily/weekly/monthly price performance.
-- [ ] Quarterly results vs IPO projections.
-- [ ] Promoter holding changes and pledge changes.
-- [ ] Lock-in expiries and supply overhang.
-- [ ] Corporate announcements and actions.
-- [ ] Use of proceeds vs stated objects.
-- [ ] Dividend/bonus/split/rights/buyback.
-- [ ] Comparison of actual performance with the original assessment.
-- [ ] Score calibration: did the verdict predict the outcome?
-
----
-
-## B. Required data fields and database structure
-
-### B1. Design principles
-
-1. **One canonical IPO row** (`ipos`) plus source-specific provenance
-   (`ipo_sources`). Never overwrite one source's value with another's without
-   recording the conflict.
-2. **Facts are periodised.** Financial values belong to a period and a basis
-   (standalone/consolidated, audited/unaudited).
-3. **Every fact is sourced.** `source_citations` links a fact to a document,
-   page, quote and retrieval time.
-4. **Derived values are reproducible.** Store the formula version and inputs
-   used, or recompute from raw facts; never store only the output.
-5. **AI output is separate.** `ai_outputs` stores model, prompt version, input
-   hash, output, citations and confidence. It never overwrites facts.
-6. **Soft-delete/history.** Keep snapshots and `created_at`/`updated_at`; do not
-   destroy history needed for backtesting.
-
-### B2. Proposed tables
-
-Existing tables: `ipos`, `gmp_history`, `analysis_reports`, `scrape_runs`,
-`ipo_sources`, `schema_migrations`.
-
-| Table | Purpose | Key columns |
+| | Perspective | Covers |
 | --- | --- | --- |
-| `companies` | Legal entity, CIN, incorporation, registered office, group | `id`, `ipo_id`, `legal_name`, `cin`, `incorporation_date`, `registered_office`, `parent_company_id` |
-| `ipo_issue` | Issue structure | `ipo_id`, `issue_type`, `fresh_issue_shares`, `ofs_shares`, `total_offer_shares`, `price_lower`, `price_upper`, `face_value`, `lot_size`, `issue_size_cr`, `min_retail_amount`, `registrar`, `lead_managers`, `market_maker`, `underwriters`, `listing_exchange`, `listing_date`, `allotment_date`, `refund_date` |
-| `issue_objects` | Objects of the issue | `ipo_id`, `rank`, `object`, `amount_cr`, `description` |
-| `shareholding` | Pre/post-issue ownership | `ipo_id`, `as_of`, `holder_category`, `shares`, `percent`, `phase` (`pre`/`post`), `pledged_percent` |
-| `financial_periods` | Period metadata | `id`, `ipo_id`, `period_type` (`annual`/`quarterly`), `fiscal_year`, `quarter`, `start_date`, `end_date`, `basis` (`standalone`/`consolidated`), `audited`, `currency`, `unit` |
-| `financial_facts` | Normalised line items | `id`, `period_id`, `statement` (`pnl`/`balance_sheet`/`cash_flow`), `line_item`, `value`, `citation_id` |
-| `financial_ratios` | Derived ratios | `id`, `period_id`, `ratio`, `value`, `formula_version`, `inputs_json` |
-| `subscription_snapshots` | Demand by category/day | `id`, `ipo_id`, `snapshot_date`, `category` (`retail`/`nii_small`/`nii_big`/`qib`/`employee`/`shareholder`/`overall`), `shares_offered`, `shares_bid`, `times`, `amount_cr` |
-| `gmp_history` (extend) | Sentiment history | add `kostak`, `subject_to_sauda`, `snapshot_date`, `scrape_run_id` |
-| `peers` | Listed comparables | `id`, `ipo_id`, `peer_name`, `ticker`, `exchange`, `market_cap_cr`, `pe`, `pb`, `ev_ebitda`, `ev_sales`, `source_citation_id` |
-| `industry_metrics` | Market context | `id`, `ipo_id`, `metric`, `value`, `unit`, `period`, `source_citation_id` |
-| `documents` | RHP/DRHP/annual reports | `id`, `ipo_id`, `doc_type`, `title`, `url`, `local_path`, `sha256`, `published_at`, `retrieved_at`, `page_count`, `status` |
-| `document_chunks` | RAG chunks | `id`, `document_id`, `page_start`, `page_end`, `text`, `token_count`, `embedding`, `embedding_model` |
-| `source_citations` | Provenance per fact | `id`, `entity_type`, `entity_id`, `document_id`, `page`, `quote`, `source_url`, `published_at`, `retrieved_at`, `quality` (`reported`/`calculated`/`estimated`/`unverified`/`missing`) |
-| `research_findings` | Litigation, governance, risks | `id`, `ipo_id`, `category`, `finding`, `severity`, `status` (`verified`/`alleged`/`unverified`), `citation_id` |
-| `post_listing_prices` | After listing | `id`, `ipo_id`, `trade_date`, `open`, `high`, `low`, `close`, `volume`, `source` |
-| `ai_outputs` | AI output (local or cloud) | `id`, `ipo_id`, `kind`, `provider`, `model`, `prompt_version`, `input_hash`, `output_json`, `citations_json`, `confidence`, `tokens`, `cost_usd`, `data_left_machine`, `created_at` |
-| `analysis_reports` (extend) | Deterministic analysis snapshots | add `model_version`, `inputs_hash`, `data_completeness` |
-| `email_log` | Delivery audit | `id`, `report_id`, `sent_at`, `recipients`, `status`, `error` |
-| `chat_sessions` / `chat_messages` | Chat history | session/message ids, role, content, citations, created_at |
-| `review_queue` | Human review | `id`, `entity_type`, `entity_id`, `reason`, `status`, `assigned_to`, `resolved_at` |
-
-### B3. Field-level metadata
-
-For every stored fact, record:
-
-| Field | Meaning |
-| --- | --- |
-| `source` | Publisher (SEBI, NSE, BSE, MCA, company, news). |
-| `document_name` | Exact document title. |
-| `document_url` | Stable URL or local path. |
-| `reporting_period` | FY/quarter and basis. |
-| `page` | Page number for PDF facts. |
-| `published_at` | Document publication date. |
-| `retrieved_at` | When we fetched it. |
-| `quality` | `reported`, `calculated`, `estimated`, `unverified`, `missing`. |
-| `confidence` | 0–1, required for estimates and AI extractions. |
-
-### B4. Canonical units and conventions
-
-- Money in **₹ crore** unless a field says otherwise; store the unit explicitly.
-- Percentages as percentage points (`12.5` means 12.5%), not fractions.
-- Dates as ISO-8601 (`YYYY-MM-DD`); timestamps as UTC ISO-8601.
-- Financial years as `YYYY-YY` (Indian April–March).
-- Shares as absolute counts; multiples as `x`.
-- Null means unknown. `0` means a real zero. Never use `0` for missing.
-
----
-
-## C. Financial formulas and calculations
-
-All formulas must be implemented once in deterministic code, unit-tested, and
-versioned. Guard every division by zero and return `None` with a reason.
-
-### C1. Growth
-
-| Metric | Formula |
-| --- | --- |
-| YoY growth | `(value_t / value_{t-1} - 1) × 100` |
-| QoQ growth | `(value_q / value_{q-1} - 1) × 100` |
-| CAGR (n years) | `(value_end / value_start)^(1/n) - 1`, expressed as % |
-| 3-year average growth | Arithmetic mean of the available YoY growth rates |
-
-### C2. Profitability
-
-| Metric | Formula |
-| --- | --- |
-| Gross profit | `Revenue - COGS` |
-| Gross margin | `Gross profit / Revenue × 100` |
-| EBITDA | `EBIT + D&A` = `PBT + finance costs + D&A` (state the definition used) |
-| EBITDA margin | `EBITDA / Revenue × 100` |
-| EBIT | `PBT + finance costs` |
-| Operating margin | `EBIT / Revenue × 100` |
-| PAT margin | `PAT / Revenue × 100` |
-| Effective tax rate | `Tax expense / PBT × 100` |
-| EPS (basic) | `PAT / weighted average shares` |
-| Post-issue EPS | `PAT / post-issue shares` |
-
-### C3. Returns
-
-| Metric | Formula |
-| --- | --- |
-| ROE | `PAT / average shareholders' equity × 100` |
-| ROCE | `EBIT / average capital employed × 100`; capital employed = `total assets - current liabilities` (or `equity + total debt`) |
-| ROA | `PAT / average total assets × 100` |
-| DuPont ROE | `net margin × asset turnover × equity multiplier` |
-
-### C4. Leverage and liquidity
-
-| Metric | Formula |
-| --- | --- |
-| Debt/equity | `total debt / shareholders' equity` |
-| Net debt | `total debt - cash and equivalents` |
-| Net debt/EBITDA | `net debt / EBITDA` |
-| Current ratio | `current assets / current liabilities` |
-| Quick ratio | `(current assets - inventory - prepaid) / current liabilities` |
-| Interest coverage | `EBIT / finance costs` |
-| DSCR (where relevant) | `(PAT + D&A + interest) / (interest + scheduled principal)` |
-
-### C5. Efficiency and working capital
-
-| Metric | Formula |
-| --- | --- |
-| Asset turnover | `Revenue / average total assets` |
-| Inventory turnover | `COGS / average inventory` |
-| Days inventory (DIO) | `365 / inventory turnover` |
-| Receivables turnover | `Revenue / average receivables` |
-| Days sales outstanding (DSO) | `365 / receivables turnover` |
-| Payables turnover | `COGS / average payables` |
-| Days payables (DPO) | `365 / payables turnover` |
-| Cash conversion cycle | `DIO + DSO - DPO` |
-| Capex intensity | `Capex / Revenue × 100` |
-
-### C6. Cash flow
-
-| Metric | Formula |
-| --- | --- |
-| Free cash flow | `OCF - capex` |
-| OCF/EBITDA | `OCF / EBITDA` |
-| OCF/PAT | `OCF / PAT` (earnings-quality indicator) |
-| Cash conversion | `OCF / EBITDA × 100` |
-| FCF yield | `FCF / market cap × 100` |
-
-### C7. Valuation
-
-| Metric | Formula |
-| --- | --- |
-| Post-issue market cap | `issue_price × post-issue shares` |
-| Enterprise value | `market cap + total debt - cash` |
-| P/E | `issue_price / post-issue EPS` |
-| P/B | `issue_price / post-issue BVPS` |
-| BVPS | `post-issue equity / post-issue shares` |
-| EV/EBITDA | `EV / EBITDA` |
-| EV/Sales | `EV / Revenue` |
-| Earnings yield | `post-issue EPS / issue_price × 100` = `1 / P/E × 100` |
-| Dilution | `(post-issue shares - pre-issue shares) / post-issue shares × 100` |
-| OFS share of issue | `OFS shares / total offer shares × 100` |
-| Minimum retail application | `lot_size × issue_price_upper` |
-| Peer premium/discount | `(company multiple / peer median multiple - 1) × 100` |
-| Implied listing gain | `(estimated_listing_price - issue_price) / issue_price × 100` |
-
-### C8. GMP and demand
-
-| Metric | Formula |
-| --- | --- |
-| GMP % | `GMP / issue_price × 100` |
-| GMP change | `GMP_t - GMP_{t-1}` |
-| GMP trend | Slope or difference over 7–14 days; label Rising/Stable/Falling |
-| Source spread | `max(latest GMP% by source) - min(latest GMP% by source)` |
-| Subscription times | `shares bid / shares offered` |
-| Day-wise subscription | Same formula per category and snapshot date |
-| Demand score | Weighted blend of QIB, NII and retail subscription, normalised |
-
-### C9. Calculation rules
-
-- Use **average** balance-sheet values for ratios when two period-end values
-  exist; otherwise use the closing value and mark the ratio `estimated`.
-- Never mix standalone and consolidated figures in one ratio.
-- Never mix annual and quarterly figures in one growth calculation.
-- Recompute all ratios after a restatement; keep the previous version.
-- Store `formula_version` with every derived ratio.
-- Round only for display; store full precision.
-
----
-
-## D. Official and secondary data sources
-
-### D1. Source hierarchy
-
-| Priority | Source | Use |
-| --- | --- | --- |
-| 1 | SEBI filings (DRHP, RHP, prospectus, observations) | Authoritative issue, business, risk, financial and object-of-issue facts. |
-| 2 | NSE / BSE disclosures | Dates, price band, lot size, subscription, allotment, listing, corporate actions. |
-| 3 | MCA records | Incorporation, directors, charges, filings, group structure. |
-| 4 | Company annual reports and audited financials | Historical financials, auditor reports, related-party transactions. |
-| 5 | Official industry/government sources | TAM, regulation, policy, macro data. |
-| 6 | Reputable financial data providers | Peer multiples, consensus, price history. |
-| 7 | Secondary news/research | Context only; never the sole source for a hard fact. |
-
-### D2. Concrete sources
-
-- **SEBI** — `sebi.gov.in` filings, EDIFAR (where available), orders, informal
-  guidance.
-- **NSE** — `nseindia.com` IPO page, allotment, subscription, listing,
-  corporate announcements, bhavcopy.
-- **BSE** — `bseindia.com` IPO page, SME platform, allotment, listing,
-  announcements, bhavcopy.
-- **MCA** — `mca.gov.in` company master data, directors, charges.
-- **Company** — RHP/DRHP/prospectus, annual reports, investor presentations,
-  credit-rating rationales.
-- **Credit-rating agencies** — CRISIL, ICRA, CARE, India Ratings, Brickwork.
-- **Industry** — ministry sites, RBI, NPCI, industry associations, trade bodies.
-- **Market data** — NSE/BSE bhavcopy, Yahoo Finance (secondary), Screener
-  (secondary).
-- **GMP** — maximum five sources, e.g. InvestorGain, IPO Watch, Chittorgarh,
-  IPO Central, Moneycontrol. Treat all as unofficial sentiment.
-
-### D3. Source rules
-
-- Prefer the primary document over a news summary of it.
-- Record the URL, publication date, retrieval date and page for every fact.
-- Do not scrape behind CAPTCHAs or paywalls; do not bypass anti-bot controls.
-- Respect robots.txt and rate limits; use a documented user agent.
-- Keep a raw copy of every fetched document (hash-addressed) for audit.
-- If two official sources disagree, store both and flag the conflict.
-
----
-
-## E. Document extraction requirements
-
-### E1. Ingestion
-
-- [ ] Discover RHP/DRHP/prospectus URL from NSE/BSE/SEBI.
-- [ ] Download with retries, timeouts and a size cap; store `sha256`.
-- [ ] Parse with **Docling** (default): page-by-page text, tables and
-      reading order. MinerU is the fallback for difficult layouts; local OCR
-      runs only on detected scanned pages.
-- [ ] Detect and skip boilerplate, headers/footers and duplicate pages.
-- [ ] Chunk text (~800–1200 tokens, 10–15% overlap) with page and table spans.
-- [ ] Embed with the configured embedding provider (local default:
-      `qwen3-embedding:0.6b`) and store vectors.
-- [ ] Index document metadata and chunks for retrieval.
-
-### E2. Extraction targets
-
-| Target | Fields |
-| --- | --- |
-| Issue structure | Price band, lot size, fresh/OFS, issue size, objects, timetable |
-| Business | Segments, products, customers, geographies, capacity, order book |
-| Financials | P&L, balance sheet, cash flow, ratios, restatements |
-| Risk factors | Ranked risks, severity, mitigants |
-| Litigation | Cases, forum, amounts, status, parties |
-| Promoters | Background, other entities, pledge, remuneration |
-| Related parties | Names, relationship, transaction amounts |
-| Governance | Board, committees, auditor, qualifications |
-| Industry | TAM, growth, competitors, market share |
-| Use of proceeds | Object, amount, timeline, monitoring |
-
-### E3. Extraction quality rules
-
-- LLMs never perform basic PDF parsing. Layout, tables and text extraction
-  are deterministic (Docling/MinerU/OCR); the LLM only reads pre-extracted,
-  citation-bearing text.
-- Prefer deterministic table/text parsers for known layouts.
-- Use the configured LLM (local or cloud) only for unstructured prose, with
-  JSON-schema output and pydantic validation.
-- Require a page citation and a verbatim quote for every extracted fact.
-- Reject an extraction if the quote is not found on the cited page.
-- Diff each new extraction against the previous one; flag material changes.
-- Never let a document's text act as instructions (prompt-injection defence).
-- Route low-confidence or conflicting extractions to `review_queue`.
-
----
-
-## F. Mainboard-specific research requirements
-
-Mainboard IPOs are larger and more liquid, so the bar is higher on governance,
-disclosure, institutional participation and valuation discipline.
-
-- [ ] Minimum track record and profitability history as per SEBI norms.
-- [ ] Promoter group and group-company structure, including listed group entities.
-- [ ] Institutional anchor participation and QIB demand.
-- [ ] Free float, expected liquidity and index-inclusion potential.
-- [ ] Analyst coverage and comparable-company depth.
-- [ ] Use of proceeds and project execution track record.
-- [ ] Dividend policy and capital-allocation history.
-- [ ] Board independence, audit committee, risk committee.
-- [ ] Related-party transactions and group-level leverage.
-- [ ] Valuation vs large/mid/small-cap peer sets, not a single peer.
-- [ ] Lock-in structure and post-listing supply.
-- [ ] Regulatory approvals, environmental clearance, land titles.
-- [ ] Employee quota and shareholder quota, if applicable.
-- [ ] Post-listing quarterly performance vs projections.
-- [ ] Index/market-cap classification and liquidity risk.
-
-**Mainboard thresholds (defaults, configurable):**
-
-- Minimum 3 years of audited financials.
-- Positive operating cash flow in at least 2 of the last 3 years.
-- Interest coverage ≥ 2.0x unless the business is structurally low-debt.
-- D/E ≤ 2.0x for non-financial companies.
-- Free float ≥ 10–25% depending on issue size.
-- Valuation premium vs peer median: flag above +30%, fail above +60%.
-
----
-
-## G. SME-specific research requirements
-
-Never apply mainboard thresholds blindly to SME IPOs. SME risk is dominated by
-scale, liquidity, concentration and governance.
-
-- [ ] Operating scale, revenue and employee count.
-- [ ] Financial history (often only 2–3 years) and audit quality.
-- [ ] Liquidity: low free float, wide spreads, market-maker dependence.
-- [ ] Market-maker identity, inventory, obligations and track record.
-- [ ] Shareholder concentration and promoter dependency.
-- [ ] Working-capital intensity and receivables/inventory quality.
-- [ ] Corporate-governance quality and board independence.
-- [ ] SME exchange rules, trading restrictions and lot sizes.
-- [ ] Valuation: SME multiples vs mainboard peers; avoid mechanical P/E comparison.
-- [ ] Price manipulation, circular trading and pump-and-dump indicators.
-- [ ] Disclosure completeness and RHP quality.
-- [ ] Migration path to mainboard, if stated.
-- [ ] Post-listing volatility and exit liquidity.
-- [ ] Lock-in and market-maker inventory overhang.
-
-**SME-specific rules (defaults, configurable):**
-
-- Require positive OCF in the latest year.
-- Cap D/E at 1.5x for non-financial SMEs; flag above 1.0x.
-- Require a named market maker and a credible market-making track record.
-- Flag free float below 25% or daily traded value below a liquidity floor.
-- Apply a valuation discount/premium band to peer median, but also show the
-  absolute valuation and the implied earnings yield.
-- Treat GMP as sentiment only; give it less weight than for mainboard.
-- Add an explicit "SME risk" block to every report.
-
----
-
-## H. Five AI summary specifications
-
-The five summaries are the five **perspectives**. Each is generated by the
-**analyst model** (`qwen3.5:9b-q4_K_M` by default; see
-[§P](#p-local-ai-stack-verified)) in an isolated context — local by default,
-cloud only with explicit opt-in — with a fixed prompt version, JSON-schema
-output, citations and confidence. The same prompts and validation run on every
-provider. If the selected provider is missing or fails, the deterministic
-template is used instead.
+| H1 | Business quality | Model, moat, position, concentration, scalability |
+| H2 | Financial health | Growth, margins, balance sheet, cash flow, ROE/ROCE |
+| H3 | Valuation | Multiples vs peers, mcap/EV, fresh vs OFS, dilution |
+| H4 | Risks | Ranked risks, litigation, governance, SME risks |
+| H5 | Overall | `Strong`/`Watch`/`Avoid`, top 3 strengths and risks, what would change the view |
 
 ### H0. Orchestration
 
-```
-for each perspective (H1–H4):
-    assemble the evidence pack: embed → retrieve → rerank (§P3)
-    run the analyst in a fresh, isolated context
-    validate the JSON schema; every claim must carry a citation
-verifier challenges the important findings of H1–H4
-    agreements merge; disagreements go to the dispute log
-if unresolved disputes and the challenger is available:
-    challenger adjudicates (lazy-loaded, solo VRAM)
-H5 synthesises H1–H4 + the dispute log + the deterministic score
+```text
+for H1–H4: build evidence pack → analyst in a fresh context → validate schema + citations
+verifier challenges findings (sees evidence, not reasoning) → dispute log
+challenger rules on unresolved disputes (optional)
+H5 synthesises H1–H4 + disputes, shown beside the deterministic score
 ```
 
-- **Isolation.** Every perspective runs in a fresh context and never sees
-  another perspective's output; only H5 synthesises. This prevents anchoring
-  and cross-contamination of reasoning.
-- **The verifier must be able to disagree.** It receives the findings and the
-  underlying evidence — not the analyst's reasoning — and challenges the
-  important ones. Disagreements are recorded in a dispute log with both
-  positions, never silently merged away.
-- **The challenger is optional.** Only unresolved disputes reach it. It
-  lazy-loads with `keep_alive=0` and unloads immediately; if the model is not
-  pulled, disputes are presented as unresolved.
-- **The deterministic score is computed independently** ([§M](#m-recommended-scoring-framework))
-  and always shown beside the AI verdicts. AI output never overrides it.
-- **Extraction is not analysis.** Perspective inputs come from the
-  [§E](#e-document-extraction-requirements) extraction pipeline (Model 3:
-  schema-validated facts with provenance). The extractor never decides
-  anything.
-- **Prompt versioning.** Every prompt carries a version recorded alongside its
-  outputs (`ai_outputs.prompt_version`); outputs are comparable only within a
-  version.
-- **Production call shape.** Deterministic settings everywhere: thinking
-  disabled, JSON output format, temperature 0. (Validated live: thinking mode
-  shifts judgement calibration; it stays off.)
-
-Each summary must contain:
-
-| Field | Meaning |
-| --- | --- |
-| `evidence` | Bullet list of facts with citations. |
-| `conclusion` | Short, non-advisory conclusion. |
-| `confidence` | `high` / `medium` / `low` with a reason. |
-| `missing_information` | What would change the conclusion. |
-| `citations` | `IPO · source · page · retrieved_at`. |
-| `data_as_of` | Timestamp of the underlying data. |
-
-### H1. Business Quality Summary
-
-- Business model, revenue streams, customer segments, geography.
-- Competitive advantages, market position, scalability.
-- Customer/supplier concentration, key-person dependence.
-- Conclusion on durability and quality of the franchise.
-- Confidence based on disclosure completeness.
-
-### H2. Financial Health Summary
-
-- Revenue, EBITDA, PAT growth and margin trends.
-- Balance-sheet strength, leverage, liquidity.
-- Cash-flow quality, working capital, receivables/inventory.
-- ROE/ROCE and earnings quality.
-- Conclusion on financial resilience and sustainability.
-
-### H3. Valuation and Pricing Summary
-
-- Issue price vs peer multiples, P/E, P/B, EV/EBITDA.
-- Implied market cap and enterprise value.
-- Premium/discount vs peers and recent listings.
-- Fresh vs OFS mix and dilution.
-- Conclusion: attractive / fair / expensive, with sensitivity.
-
-### H4. Risk and Red Flag Summary
-
-- Ranked risks from the RHP and data.
-- Litigation, regulatory, tax, governance, related-party issues.
-- Customer/supplier/key-person/industry risks.
-- SME-specific risks where applicable.
-- Conclusion with severity and confidence.
-
-### H5. Overall Investment Assessment
-
-- Synthesise the four summaries and the deterministic score.
-- State the verdict (`Strong` / `Watch` / `Avoid`) and why.
-- Top 3 strengths and top 3 risks.
-- What would change the view.
-- Explicitly not investment advice; show data timestamps.
+Perspectives never see each other. Disagreements are logged, never merged
+away. The deterministic score ([§M](#m-scoring)) is independent and always
+shown. Prompts are versioned (`ai_outputs.prompt_version`). Calls run with
+thinking off, JSON output, temperature 0. If no provider is available, a
+deterministic template is used.
 
 ### H6. Interim evidence: web research
 
-Until the Phase 2 document pipeline exists, the evidence pack is built by a
-**researcher** role (web-enabled `claude-code`; unset fields inherit the
-extractor role) instead of RHP extraction:
+Until RHP extraction exists, a web-enabled **researcher** role builds the
+evidence pack: official and exchange sources first, each fact with a URL and
+a type (`official`, `exchange`, `secondary`), conflicts kept, gaps listed.
+The pipeline assigns ids (`W1…`, app data as `D1…`); a citation gate drops
+unknown ids. Web facts are unverified and become corroboration once RHP
+extraction lands. Code: `backend/src/research/` (`research-v1`).
 
-- The researcher searches and reads pages, preferring the RHP/DRHP, SEBI and
-  the company/registrar, then NSE/BSE, then reputable media and aggregators
-  (§D1), and returns schema-validated facts with a URL and a source type
-  (`official`, `exchange`, `secondary`). Conflicting figures are kept as
-  separate facts; missing items are listed as gaps.
-- The pipeline assigns fact ids (`W1…`) and adds this app's own data as
-  `database` facts (`D1…`), so the model never invents ids.
-- Perspectives cite fact ids; a citation gate drops evidence whose ids do not
-  exist. Points resting only on `secondary` facts must say so.
-- Web facts are **unverified**. When Phase 2 lands, the same perspectives run
-  over page-cited RHP extraction, and web facts become corroboration.
-- Implementation: `backend/src/research/` (prompt version `research-v1`);
-  outputs in `research_runs` and `ai_outputs` with provider, model, input
-  hash, tokens and `data_left_machine`.
+## I. Detailed PDF
 
----
+One per IPO, with citations: cover (with deep link/QR) → executive summary →
+issue snapshot → business → industry and peers → financials → valuation →
+promoters → risks → SME module (SME only) → GMP and sentiment →
+post-listing (if listed) → five AI summaries → checklist → sources →
+glossary and disclaimer. Every chart/table states source, period and status.
 
-## I. Detailed PDF report structure
+## J. Summary PDF
 
-One PDF per IPO, generated locally, with page-level citations.
+One PDF across IPOs, built as an index into the app: cover (run date,
+filters, freshness) → shortlist table → one page per IPO (snapshot, key
+metrics, top 3 strengths/risks, verdict, gaps, QR and URL to `/ipos/{id}`) →
+methodology → data-quality appendix. Base URL from config; never put secrets
+in the PDF.
 
-1. **Cover** — company, exchange/segment, issue dates, price band, report date,
-   data-as-of timestamp, deep link/QR to the app detail page.
-2. **Executive summary** — verdict, score, top strengths/risks, key metrics,
-   data completeness.
-3. **Issue snapshot** — issue size, fresh/OFS, lot size, minimum application,
-   registrar, lead managers, market maker, objects of issue.
-4. **Company and business** — history, model, products, customers, geography,
-   capacity, order book, subsidiaries, related parties.
-5. **Industry and peers** — TAM, growth, market share, competitors, peer table,
-   valuation comparison.
-6. **Financial analysis** — annual and quarterly tables, growth, margins,
-   balance sheet, cash flow, ratios, charts, earnings-quality checks.
-7. **Valuation** — market cap, EV, P/E, P/B, EV/EBITDA, earnings yield,
-   dilution, peer premium/discount, fair-value range.
-8. **Promoter and management** — backgrounds, track record, litigation, pledge,
-   remuneration, governance, auditor.
-9. **Risk and red flags** — ranked risks, severity, mitigants, contingent
-   liabilities, regulatory issues.
-10. **SME module** — only for SME IPOs; liquidity, market maker, concentration,
-    manipulation indicators, valuation caveats.
-11. **GMP and sentiment** — GMP history chart, source spread, subscription by
-    category, anchor participation, listing performance (if listed).
-12. **Post-listing tracking** — only if listed; price performance, results vs
-    projections, promoter/lock-in changes.
-13. **Five AI summaries** — one section each, with evidence, conclusion,
-    confidence, missing information and citations.
-14. **Deterministic checklist** — pass/warn/fail/manual with details.
-15. **Sources and citations** — document list, page references, retrieval dates,
-    data-quality status.
-16. **Glossary and disclaimer** — definitions, methodology, not-investment-advice
-    statement.
+## K. Workflow and gates
 
-Every chart/table must state its source, period and whether values are reported,
-calculated or estimated.
+Discover → fetch documents → extract → validate citations → reconcile
+sources → compute ratios → score → AI summaries → review queue → PDFs →
+email → track post-listing → calibrate.
 
----
-
-## J. Summary PDF report structure
-
-One short PDF covering multiple IPOs, designed as an index into the app.
-
-1. **Cover** — run date, filters (GMP ≥ 20%, upcoming included/excluded), data
-   freshness, app base URL.
-2. **Shortlist table** — name, segment, verdict, score, GMP %, issue price,
-   issue size, close date, data completeness, deep link.
-3. **One page per IPO** (or two if needed):
-   - Snapshot: price band, dates, issue size, fresh/OFS, lot size.
-   - Key metrics: GMP %, P/E, subscription, revenue/PAT growth, D/E.
-   - Top 3 strengths and top 3 risks.
-   - Verdict and confidence.
-   - Data gaps and "read the full report in the app" call to action.
-   - QR code and short URL to `/ipos/{id}`.
-4. **Methodology and disclaimer** — scoring weights, data sources, not advice.
-5. **Appendix** — data-quality summary, failed scrapes, stale data warnings.
-
-**Deep-link rules**
-
-- Base URL comes from config (`APP_BASE_URL`, default `http://localhost:3000`).
-- Route pattern: `/ipos/{id}` (overview) and `/ipos/{id}?tab=financials`
-  (in-depth).
-- Include both a human-readable URL and a QR code.
-- If the app is not reachable (e.g. printed at a remote location), the QR still
-  encodes the IPO ID so the reader can look it up later.
-- Never put secrets or tokens in the PDF.
-
----
-
-## K. Automated research and verification workflow
-
-```
-Discover IPOs
-  → fetch official documents (NSE/BSE/SEBI)
-  → deterministic extraction + LLM fallback (local or cloud)
-  → schema validation + citation verification
-  → source reconciliation + conflict flagging
-  → compute financial facts and ratios
-  → run deterministic checks and scoring
-  → generate five AI summaries (optional; local or cloud)
-  → route low-confidence items to review queue
-  → render detailed + summary PDFs with deep links
-  → email / publish
-  → track post-listing outcomes
-  → calibrate scoring against outcomes
-```
-
-### K1. Stages and gates
-
-| Stage | Deterministic gate | Failure handling |
+| Stage | Gate | On failure |
 | --- | --- | --- |
-| Discovery | Valid name, exchange, dates, status | Skip and log. |
-| Document fetch | HTTP 200, valid PDF, hash stored | Retry, then mark missing. |
-| Extraction | Schema valid, quote found on page | Reject, retry with parser, queue review. |
-| Reconciliation | Conflicts recorded, not overwritten | Flag and use the higher-priority source. |
-| Calculations | Inputs present, no divide-by-zero | Return `None` with reason. |
-| Scoring | All required inputs present | Reduce confidence, never invent. |
-| Summaries | JSON valid, citations valid | Fall back to template. |
-| PDF | Non-empty, links resolve | Block send, alert. |
-| Email | Recipients configured, PDF attached | Log and retry. |
+| Discovery | Valid name, exchange, dates | Skip and log |
+| Fetch | HTTP 200, valid PDF, hash | Retry, then mark missing |
+| Extraction | Schema valid, quote on page | Reject, queue review |
+| Reconciliation | Conflicts recorded | Use higher-priority source, flag |
+| Calculation | Inputs present | `None` with reason |
+| Scoring | Required inputs | Lower confidence, never invent |
+| Summaries | JSON and citations valid | Template fallback |
+| PDF / email | Non-empty, recipients set | Block send, log, retry |
 
-### K2. Verification checklist
+Feedback loop: store the original score and inputs, record 1-week to 1-year
+returns after listing, recalibrate weights only with evidence, keep a
+changelog of scoring and formula versions.
 
-- [ ] Every hard fact has a citation.
-- [ ] Every calculated metric has inputs and a formula version.
-- [ ] Every AI claim has a citation or is labelled as interpretation.
-- [ ] Conflicting sources are recorded, not silently resolved.
-- [ ] Missing data is explicit and counted in completeness.
-- [ ] Dates are ISO-8601 and timezone-aware where relevant.
-- [ ] Units are explicit and consistent.
-- [ ] Post-listing outcomes are linked back to the original assessment.
+## L. Data quality
 
-### K3. Feedback loop
-
-- Store the original score, inputs and data completeness.
-- After listing, store 1-week/1-month/3-month/6-month/1-year returns.
-- Compare verdicts with outcomes; recalibrate weights only with evidence.
-- Keep a changelog of scoring and formula versions.
-
----
-
-## L. Missing information and data-quality handling
-
-### L1. Data-quality states
-
-| State | Meaning | UI treatment |
+| State | Meaning | UI |
 | --- | --- | --- |
-| `reported` | Taken directly from an official document. | Normal. |
-| `calculated` | Derived from reported values with a documented formula. | Show formula. |
-| `estimated` | Inferred or approximated. | Show estimate badge + confidence. |
-| `unverified` | From a secondary source or unconfirmed claim. | Show warning. |
-| `missing` | Not found. | Show "missing", never a blank zero. |
+| `reported` | From an official document | Normal |
+| `calculated` | Derived by a documented formula | Show formula |
+| `estimated` | Approximated | Badge + confidence |
+| `unverified` | Secondary or unconfirmed | Warning |
+| `missing` | Not found | "Missing", never zero |
 
-### L2. Rules
+Never fabricate or treat missing as zero. Show completeness per IPO, data
+age and stale flags, both values when sources conflict, and what would change
+the conclusion. A missing model or document must not block the pipeline.
 
-- Never fabricate a value to fill a gap.
-- Never treat a missing value as zero in a calculation.
-- Show data completeness per IPO (e.g. 62% of checklist items sourced).
-- Show the age of each data point; flag stale GMP or price data.
-- If sources conflict, show both and the chosen value with a reason.
-- Distinguish "verified disclosure" from "allegation" and "unverified claim".
-- Route low-confidence AI extractions to human review.
-- Degrade gracefully: a missing model or document must not block the pipeline.
-- Make every report state what is missing and what would change the conclusion.
+Validation: `close ≥ open`, `listing ≥ close`; `price_lower ≤ price_upper`;
+`fresh + OFS ≈ total`; `assets ≈ liabilities + equity`; non-negative
+subscription; GMP outliers (> 500%) flagged; no overlapping periods.
 
-### L3. Validation rules
+## M. Scoring
 
-- `close_date >= open_date`; `listing_date >= close_date` where present.
-- `price_lower <= price_upper`; `issue_price` within the band.
-- `fresh_issue + ofs ≈ total_offer` within rounding tolerance.
-- Balance sheet: `assets ≈ liabilities + equity` within tolerance.
-- Cash flow: `ending cash ≈ beginning cash + net cash flow`.
-- Subscription times non-negative; GMP outliers flagged (e.g. > 500%).
-- Financial period dates must not overlap for the same basis/type.
-- Duplicate detection on `ipo_sources`, normalized name and fuzzy similarity.
+**Today:** GMP 25%, valuation 25%, fundamentals 25%, subscription 15%,
+risk 10%. Each factor is scored 0–100 with an explanation.
 
----
+**Planned v2:** financial quality 25%, valuation 20%, business quality 15%,
+issue structure 10%, demand and sentiment 15%, risk and governance 15%.
 
-## M. Recommended scoring framework
+Verdicts: **≥ 75 Strong**, **55–74 Watch**, **< 55 Avoid**. Missing inputs
+lower confidence, not the score; show completeness and confidence beside it
+("high score, low confidence" is a valid result); cap any one factor; publish
+weights; recalibrate only with a backtest.
 
-Keep the current transparent weighted score as the baseline. The research-grade
-version can add factors without becoming a black box.
+## N. Extra categories
 
-### M1. Baseline (implemented today)
+Worth covering beyond A: tax disputes and GST, ESG and climate risk,
+insurance, FX/commodity and interest-rate sensitivity, order-book quality,
+receivables ageing, pre-IPO deals and warrants, ESOP overhang, lock-in
+expiries, anchor quality, lead-manager track record, use-of-proceeds
+execution, related-party pricing, off-balance-sheet financing,
+single-plant/customer concentration, fraud signals (sudden auditor
+resignation, shell entities), management credibility, minority-shareholder
+protection.
 
-| Factor | Weight |
-| --- | --- |
-| GMP | 25% |
-| Valuation | 25% |
-| Fundamentals | 25% |
-| Subscription | 15% |
-| Risk | 10% |
+## O. Roadmap
 
-Each factor has an explicit 0–100 score, a weight, a weighted contribution and a
-plain-language explanation. Verdict: `Strong` / `Watch` / `Avoid`.
+Done: provider-agnostic AI layer with role routing and the `claude-code`
+provider; web-evidence research (H1–H5, verifier, disputes, challenger);
+daily scheduled run with AI verdicts in the PDF and email; subscriber digest
+with Google sign-in.
 
-### M2. Proposed research-grade v2
+Open:
 
-| Factor | Weight | Inputs |
+- **AI layer** — `fastembed` and `llamacpp` rerankers; challenger loading
+  with `keep_alive=0`; web research on the `anthropic` API provider.
+- **Documents** — RHP discovery, download, Docling parse, chunk, embed;
+  `documents`, `document_chunks`, `source_citations`; subscription snapshots.
+- **Financial engine** — issue, shareholding, financial and peer tables;
+  every §C metric in code with `formula_version`; `/overview` and
+  `/financials` endpoints; completeness and confidence; in-depth app tab.
+- **Extraction** — schema-validated RHP extraction with page quotes;
+  prompt-injection defence; review queue.
+- **Reports** — detailed (§I) and summary (§J) PDFs with charts, deep links
+  and QR codes; `email_log` with retries.
+- **Quality and ops** — more sources, fuzzy cross-source matching, golden-set
+  evaluation, health alerts, retention, post-listing tracking and backtests,
+  OpenAPI-generated frontend types, one-command stack.
+
+## P. AI stack
+
+Verified on Windows, AMD RX 9070 XT (16 GB), Ollama 0.40.12. A model is
+trusted for a role only after `ollama ps` shows `100% GPU`.
+
+### P1. Models
+
+| Role | Local | Claude |
 | --- | --- | --- |
-| Financial quality | 25% | Growth, margins, ROE/ROCE, cash conversion, leverage |
-| Valuation | 20% | P/E, P/B, EV/EBITDA vs peers, earnings yield |
-| Business quality | 15% | Moat, market position, concentration, scalability |
-| Issue structure | 10% | Fresh vs OFS, objects, dilution, anchor/lock-in |
-| Demand and sentiment | 15% | Subscription, GMP trend, source spread |
-| Risk and governance | 15% | Litigation, auditor, related-party, SME risks |
+| Analyst (H1–H5, chat) | `qwen3.5:9b-q4_K_M` | `claude-sonnet-5-5` |
+| Verifier | `gemma4:12b` | `claude-opus-5-5` |
+| Extractor (JSON, never decides) | `qwen3.5:4b-q4_K_M` | `claude-haiku-5-5` |
+| Challenger (optional, disputes only) | `gpt-oss:20b` (loads solo, ~13 GB) | `claude-opus-5-5` |
+| Researcher (web) | — | via `claude-code` |
+| Embedder | `qwen3-embedding:0.6b` | stays local |
+| Reranker | see §P3 | `llm` backend on the extractor |
 
-### M3. Score construction rules
-
-- Each factor is scored 0–100 using documented thresholds.
-- Missing inputs reduce **confidence**, not the score silently.
-- Show `data_completeness` separately (0–100%).
-- Show `confidence` (`high`/`medium`/`low`) alongside the score.
-- Never let a single factor dominate; cap any factor's contribution.
-- Publish the weights and thresholds in the report and in config.
-- Recalibrate only with a documented backtest.
-
-### M4. Verdict bands
-
-| Score | Verdict | Meaning |
-| --- | --- | --- |
-| ≥ 75 | Strong | Multiple factors align; still not advice. |
-| 55–74 | Watch | Mixed; needs monitoring or more data. |
-| < 55 | Avoid | Material concerns or poor risk/reward. |
-
-Always show the reasons, the data gaps and the confidence. A high score with low
-completeness must be shown as "high score, low confidence".
-
----
-
-## N. Additional research categories
-
-Categories the first draft may have under-weighted:
-
-1. **Tax** — historical tax disputes, effective tax rate, deferred tax, GST
-   issues, transfer pricing.
-2. **ESG** — emissions, water, waste, safety, labour, community, board diversity.
-3. **Cyber and data privacy** — breaches, compliance, IT dependency.
-4. **Insurance** — coverage vs exposure, claims history.
-5. **FX and commodities** — export/import share, hedging policy, sensitivity.
-6. **Interest-rate sensitivity** — floating-rate debt, refinancing risk.
-7. **Seasonality** — revenue and working-capital seasonality.
-8. **Capacity utilisation** — current vs optimal, capex timing.
-9. **Order book quality** — cancellable vs firm, execution history.
-10. **Customer credit quality** — receivables ageing, bad debts, write-offs.
-11. **Supplier reliability** — single-source, lead times, price pass-through.
-12. **Key-person and succession** — dependence, bench strength.
-13. **Employee relations** — attrition, unions, strikes, safety incidents.
-14. **Intellectual property** — patents, disputes, licensing, obsolescence.
-15. **Brand and marketing** — spend efficiency, customer acquisition cost.
-16. **Distribution** — dealer quality, channel conflict, dependence.
-17. **Group structure** — cross-holdings, common control, group leverage.
-18. **Pre-IPO transactions** — valuations, investors, warrants, anti-dilution.
-19. **ESOP and dilution** — pool size, vesting, post-issue overhang.
-20. **Lock-in and supply** — anchor, promoter, pre-IPO investor expiries.
-21. **Market-maker quality (SME)** — inventory, spreads, track record.
-22. **Registrar and lead-manager track record** — past issue performance.
-23. **IPO grading** — rating-agency grade, if any.
-24. **Anchor quality** — long-only vs trading, lock-in, concentration.
-25. **Post-listing surveillance** — price bands, circuit limits, volumes.
-26. **Corporate actions** — bonus, split, dividend, rights, buyback.
-27. **Use-of-proceeds execution** — actual vs stated, monitoring agency reports.
-28. **Related-party pricing** — fairness, transfer pricing, circular flows.
-29. **Contingent liabilities** — guarantees, claims, tax demands.
-30. **Regulatory change** — pending laws, licensing, tariffs, subsidies.
-31. **Geopolitical and macro** — demand shocks, currency, inflation.
-32. **Competitor actions** — capacity additions, pricing wars, new entrants.
-33. **Technology disruption** — substitution, automation, AI exposure.
-34. **Climate/physical risk** — floods, heat, water stress, transition risk.
-35. **Business continuity** — single plant, single customer, single geography.
-36. **Fraud and manipulation indicators** — circular trading, shell entities,
-    sudden auditor resignation, unexplained related-party flows.
-37. **Management guidance credibility** — past promises vs delivery.
-38. **Working-capital financing** — receivable discounting, LC/BG dependence.
-39. **Off-balance-sheet financing** — SPVs, joint ventures, guarantees.
-40. **Minority-shareholder protection** — related-party approvals, veto rights,
-    dividend policy, board representation.
-
----
-
-## O. Implementation roadmap
-
-Six phases; each lands independently with tests, lint and a commit. Items
-are checked off here as they ship. Status: Phase 0 done; Phase 1 done except
-the `fastembed`/`llamacpp` rerankers and challenger lazy-loading; Phase 4
-done over web evidence (RHP extraction waits on Phase 2); Phases 2, 3 and 5
-not started; daily scheduled runs have shipped.
-
-### Phase 0 — Foundation (done)
-
-- [x] Provider-agnostic AI layer (`backend/src/llm/`, commit `ad529a2`):
-      `LLMProvider` contract, OpenAI-compatible adapter, native Anthropic and
-      Gemini adapters, `NullProvider` fallback, response cache, `LLMClient`.
-- [x] Chat endpoint grounded in DB context with a deterministic composer
-      fallback; AI status in `/api/health`.
-- [x] Local model stack pulled and GPU-verified
-      ([§P](#p-local-ai-stack-verified)).
-
-### Phase 1 — Role routing and reranking
-
-- [x] Per-role config keys `LLM_ROLE_<ROLE>_MODEL` for analyst, verifier,
-      extractor, challenger and embedder; optional per-role
-      provider/base-URL/key/fallback overrides.
-- [x] `LLMClient.for_role(role)`; the challenger is skipped gracefully until
-      its model is configured. (Ollama `keep_alive=0` lazy-loading is still
-      open.)
-- [ ] `RerankProvider` with the three §P3 backends — the contract and the
-      `llm` backend (alias `ollama-llm`, provider-agnostic) are done;
-      `fastembed` and `llamacpp` are still open.
-- [x] Per-role availability in `/api/health`; offline tests for routing,
-      fallback and reranking.
-- [x] `.env.example` and README updated with the role contract.
-- [x] `claude-code` provider: the same roles on a Claude subscription
-      ([§P6](#p6-claude-profile)).
-
-### Phase 2 — Document pipeline and storage
-
-- [ ] RHP/DRHP discovery; download with retries, timeouts, size cap and
-      `sha256` storage.
-- [ ] Docling parsing (MinerU fallback, OCR for scanned pages) → chunks
-      (~800–1200 tokens, 10–15% overlap) with page/table/period provenance.
-- [ ] Tables: `documents`, `document_chunks`, `source_citations`.
-- [ ] Embedding via `qwen3-embedding:0.6b`; vector storage and retrieval.
-- [ ] Subscription snapshots by category and day (`subscription_snapshots`).
-
-### Phase 3 — Financial calculation engine
-
-- [ ] Tables: `ipo_issue`, `issue_objects`, `shareholding`,
-      `financial_periods`, `financial_facts`, `financial_ratios`, `peers`.
-- [ ] Every §C metric in deterministic code (pandas/NumPy/Decimal), with
-      `formula_version`, stored inputs and reported-vs-calculated flags;
-      LLM-generated ratios are never trusted.
-- [ ] `GET /api/ipos/{id}/overview` and `GET /api/ipos/{id}/financials`.
-- [ ] Data-completeness and confidence scores (§L) in the API and reports.
-- [ ] App Overview and In-depth tabs on the new endpoints (frontend
-      follow-up).
-
-### Phase 4 — Extraction and orchestration
-
-- [ ] Model 3 extraction: schema-validated JSON with page citations and
-      quote verification (§E3); prompt-injection defence.
-- [x] Interim evidence path: web research by the researcher role with
-      per-fact URLs and source types ([§H6](#h6-interim-evidence-web-research)).
-- [x] Research findings: promoters and management, litigation, related
-      parties, governance, peers and industry context — gathered from the
-      web for now; to be confirmed against the RHP once Phase 2 lands.
-- [x] Five isolated analyst perspectives (§H0): H1–H4 isolated, H5
-      synthesis beside the deterministic score; citation gate
-      (`backend/src/research/`).
-- [x] Verifier challenge pass; dispute log stored in `ai_outputs`.
-- [x] Optional challenger for unresolved disputes (skipped until configured).
-- [ ] Review queue for low-confidence or conflicting extractions.
-
-### Phase 5 — Reports
-
-- [ ] Detailed PDF per IPO (§I) and summary PDF (§J), generated as
-      background jobs with DB-tracked status.
-- [ ] Deep links and QR codes; email delivery audit (`email_log`).
-
-### Beyond Phase 5 — scale, quality and automation
-
-- [ ] Additional sources behind the scraper interface; cross-source fuzzy
-      matching and an alias table.
-- [ ] Evaluation harness with a golden set of RHP questions;
-      prompt-injection tests.
-- [x] Scheduled runs: `run --research --email` reuses fresh research
-      (`RESEARCH_MAX_AGE_HOURS`), puts AI verdicts in the PDF and email, and
-      runs daily through `backend/scripts/scheduled-run.ps1` (Task Scheduler).
-- [ ] Scraper/run health alerts; retention policy and audit trail.
-- [ ] Post-listing price tracking and backtesting of scoring weights against
-      listing outcomes.
-
----
-
-## P. Local AI stack (verified)
-
-Everything in this section was verified on the target machine — Windows,
-AMD Radeon RX 9070 XT (16 GB VRAM), Ollama 0.40.12 (whose inference runner
-is llama.cpp). Verification is a rule, not an assumption: a model is trusted
-for a role only after `ollama ps` shows `100% GPU` for it.
-
-### P1. Model manifest
-
-The six roles of the original design, mapped to concrete models:
-
-| Role | Model | Runtime | Verified |
-| --- | --- | --- | --- |
-| Analyst — five perspectives, synthesis (Model 1) | `qwen3.5:9b-q4_K_M` | Ollama | 100% GPU, ~83 tok/s |
-| Verifier — challenge pass (Model 2) | `gemma4:12b` | Ollama | 100% GPU, ~108 tok/s |
-| Extractor — JSON + provenance, never decides (Model 3) | `qwen3.5:4b-q4_K_M` | Ollama | 100% GPU, ~104 tok/s |
-| Challenger — disputes only (Model 4) | `gpt-oss:20b` | Ollama | optional; not pulled; lazy-loads solo (~13 GB VRAM) |
-| Embedder (Model 5) | `qwen3-embedding:0.6b` | Ollama | 100% GPU, `/api/embed` |
-| Reranker (Model 6) | see [§P3](#p3-reranker-backends) | not Ollama | backends below |
-
-Operational facts:
-
-- The four pulled models coexist in VRAM (~11 GB with buffers), so the core
-  loop — extract → analyse → verify → embed — runs without model swapping.
-  The challenger is the only model that must load solo.
-- The challenger loads on demand with `keep_alive=0` so it unloads
-  immediately after use; it is never kept resident.
-- Models live in `C:\Users\admin\.ollama\models`. Pull and verify:
+The four core local models fit in VRAM together (~11 GB). On Claude, the
+verifier's independence comes from a stronger tier plus an isolated context.
+Document parsing always stays local.
 
 ```powershell
-ollama pull qwen3-embedding:0.6b      #   639 MB — embedder
-ollama pull qwen3.5:4b-q4_K_M        #  3.3 GB — extractor
-ollama pull qwen3.5:9b-q4_K_M        #  6.6 GB — analyst
-ollama pull gemma4:12b              #  ~8 GB — verifier
-ollama pull gpt-oss:20b             #   14 GB — challenger (optional)
-ollama ps                            # PROCESSOR must read 100% GPU
+ollama pull qwen3-embedding:0.6b; ollama pull qwen3.5:4b-q4_K_M
+ollama pull qwen3.5:9b-q4_K_M;   ollama pull gemma4:12b
+ollama ps   # PROCESSOR must read 100% GPU
 ```
 
-### P2. Reranking reality
+### P2. Reranking on Ollama
 
-Ollama cannot serve a true reranker — verified, not assumed:
-
-- `POST /api/rerank` returns **HTTP 404** on the installed version; upstream
-  rerank support PRs remain unmerged.
-- Registry models named "reranker" (`qllama/bge-reranker-v2-m3`,
-  `dengcao/Qwen3-Reranker-*`, …) are capability-tagged `embedding`: Ollama
-  serves them through `/api/embed` as vectors, with no way to score a
-  (query, passage) pair.
-- `bge-m3` is BAAI's **embedder**, not the reranker. The reranker role calls
-  for `bge-reranker-v2-m3`, a cross-encoder built on the BGE-M3 base — hence
-  the confusingly similar name. Pulling `bge-m3` adds a second embedder, not
-  a reranker, and the already-pulled `qwen3-embedding:0.6b` is the newer,
-  stronger choice for that role anyway.
+Ollama cannot serve a true reranker: `/api/rerank` returns 404, and
+"reranker" registry models are served only as embedders. `bge-m3` is an
+embedder; the cross-encoder is `bge-reranker-v2-m3`.
 
 ### P3. Reranker backends
 
-One `RerankProvider` contract, selected by `RERANK_PROVIDER`:
+Selected by `RERANK_PROVIDER`:
 
-| Backend | What it is | Precision | Extra moving parts |
-| --- | --- | --- | --- |
-| `ollama-llm` (default) | the extractor model scores passages 0–10 as JSON | good | none — pure Ollama |
-| `fastembed` | true BGE cross-encoder (`BAAI/bge-reranker-v2-m3`), ONNX, in-process | best | one pip dependency, CPU |
-| `llamacpp` | llama-server `/v1/rerank`, `--rerank-bge-v2-m3-default`, Vulkan GPU | best | a second local service |
+| Backend | What | Status |
+| --- | --- | --- |
+| `llm` / `ollama-llm` (default) | Extractor scores passages 0–10 as JSON | Done; validated live (4 passages, 0.65 s) |
+| `fastembed` | BGE cross-encoder, ONNX, in-process CPU | Open |
+| `llamacpp` | `llama-server --rerank-bge-v2-m3-default` on Vulkan (no `-fa` on AMD) | Open |
 
-- **Default: `ollama-llm`.** Validated live on the target machine with the
-  production call shape — `qwen3.5:4b-q4_K_M`, `think:false`,
-  `format:"json"`, `temperature:0` — scoring four passages correctly in
-  0.65 s (66 output tokens).
-- Upgrade path: flip one config value to `fastembed` (the true BGE
-  cross-encoder, still fully local and in-process) or `llamacpp` (GPU) if
-  retrieval precision disappoints.
-- If `llamacpp` is used: `llama-server --rerank-bge-v2-m3-default --host
-  127.0.0.1 --port 11435 --n-gpu-layers 99`. Do **not** add `-fa` (Flash
-  Attention) — a known crash combination on AMD Vulkan.
-- Cloud rerankers (e.g. Cohere) are not wired in; the contract would allow
-  adding one later behind `LLM_ALLOW_CLOUD`.
-
-### P4. Role routing contract
-
-Every role is config-swappable and independently local or cloud. Unset role
-keys inherit the global `LLM_*` settings:
+### P4. Role routing
 
 ```bash
 LLM_ROLE_ANALYST_MODEL=qwen3.5:9b-q4_K_M
 LLM_ROLE_VERIFIER_MODEL=gemma4:12b
 LLM_ROLE_EXTRACTOR_MODEL=qwen3.5:4b-q4_K_M
-LLM_ROLE_CHALLENGER_MODEL=gpt-oss:20b      # absent model = graceful skip
+LLM_ROLE_CHALLENGER_MODEL=gpt-oss:20b    # unset = skipped
 LLM_ROLE_EMBEDDER_MODEL=qwen3-embedding:0.6b
-# LLM_ROLE_RESEARCHER_*                    # web research; inherits the extractor
-RERANK_PROVIDER=ollama-llm                 # ollama-llm | fastembed | llamacpp
+# LLM_ROLE_RESEARCHER_*                  # inherits the extractor
+RERANK_PROVIDER=ollama-llm
 ```
 
-- Optional per-role overrides follow the pattern
-  `LLM_ROLE_<ROLE>_{MODEL,PROVIDER,BASE_URL,API_KEY}` — e.g. pointing just
-  the challenger at a cloud provider while everything else stays local.
-- `LLMClient.for_role(role)` resolves provider, base URL, key and model for
-  a role from these settings and the global `LLM_*` fallbacks
-  (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`,
-  `LLM_FALLBACK_PROVIDERS`).
-- Every provider implements `generate`, `embed`, `health` and `capabilities`;
-  the OpenAI-compatible adapter covers most local runtimes (Ollama is
-  OpenAI-compatible at `http://localhost:11434/v1`) and cloud APIs, with
-  native adapters only where needed (Anthropic, Gemini). Selection is
-  config-only. The same prompts, schemas, citation checks, caching and
-  evaluation run on every provider.
-- `/api/health` reports per-role availability, provider and model.
+Any role can override `LLM_ROLE_<ROLE>_{MODEL,PROVIDER,BASE_URL,API_KEY,FALLBACKS}`;
+unset keys inherit `LLM_*`. `LLMClient.for_role(role)` resolves them. Every
+provider implements `generate`, `embed`, `health`, `capabilities`; the
+OpenAI-compatible adapter covers most runtimes, with native Anthropic and
+Gemini adapters.
 
 ### P5. Cloud policy
 
-Cloud adapters (`openai`, `anthropic`, `gemini`, `openrouter`, `groq`) are
-implemented but locked off. The pipeline itself stays local per the design
-rule. Permitted uses, each requiring `LLM_ALLOW_CLOUD=true` and an API key:
+Local first. Cloud needs `LLM_ALLOW_CLOUD=true` plus a key, and is for one
+role override, dev-time grading or a loudly logged fallback — never a silent
+one. Every output records provider, model and prompt version.
 
-- Point one role (typically the challenger) at a cloud model via its
-  per-role override.
-- Development-time grading: run a strong model over a few IPOs to find where
-  local prompts and models fail.
-- A logged fallback in `LLM_FALLBACK_PROVIDERS` when local inference is
-  down — logged loudly, never silent.
+### P6. Claude modes
 
-Hard rules, unchanged: local-first by default; `LLM_ALLOW_CLOUD=false` unless
-explicitly enabled; no silent fallback from local to cloud; every output
-records provider, model and prompt version (`ai_outputs`).
-
-### P6. Claude profile
-
-The same six roles on Claude, for personal use on a Claude Pro/Max
-subscription (`LLM_PROVIDER=claude-code`, through the headless `claude` CLI)
-or for commercial use on the API (`LLM_PROVIDER=anthropic` + `LLM_API_KEY`).
-The model ids are identical in both modes, so switching is config-only.
-
-| Role | Local model (§P1) | Claude equivalent | Reasoning |
-| --- | --- | --- | --- |
-| Analyst | `qwen3.5:9b-q4_K_M` | `claude-sonnet-5-5` | the capable workhorse slot |
-| Verifier | `gemma4:12b` | `claude-opus-5-5` | locally, independence comes from a different model family; on Claude it comes from a stronger tier plus an isolated context |
-| Extractor | `qwen3.5:4b-q4_K_M` | `claude-haiku-5-5` | small, fast, schema-bound (`--json-schema`) |
-| Challenger | `gpt-oss:20b` | `claude-opus-5-5` | strongest tier, disputes only, so it rarely spends quota |
-| Embedder | `qwen3-embedding:0.6b` | stays local | Claude offers no embeddings; local is free and private (Voyage AI is the API-mode option later) |
-| Reranker | `ollama-llm` | `llm` → extractor (Haiku) | the same 0–10 JSON scoring prompt on another provider |
-
-Document parsing (Docling / MinerU / OCR) stays local and deterministic.
-
-Subscription-mode rules:
-
-- Personal use only. A multi-user or commercial deployment must use the API
-  path. The provider logs this once at startup.
-- `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are stripped from the CLI's
-  environment so calls are never silently API-billed. `/api/health` shows
-  whether the login is a `claude.ai` subscription.
-- `LLM_MAX_CONCURRENCY` (default 2) caps parallel CLI calls. The five analyst
-  perspectives queue behind it rather than hitting plan rate limits.
-- A local fallback can pin its own model, e.g.
-  `LLM_FALLBACK_PROVIDERS=ollama=qwen3.5:9b-q4_K_M`. The fallback is logged,
-  like every hop.
-
----
-
-## Appendix: current gaps vs this specification
-
-| Area | Current state | Needed |
-| --- | --- | --- |
-| Financial statements | Not stored | Periodised facts + ratios (Phase 3) |
-| Source citations | Per-fact URLs for web research (§H6); no page citations | Per-fact document/page citations (Phase 2) |
-| RHP extraction | Not implemented; web research is the interim evidence path | Ingestion + extraction + citations (Phases 2 and 4) |
-| Overview/in-depth app | Detail page with Overview and AI research tabs | In-depth financial tab (Phase 3) |
-| PDF deep links | Not implemented | Base URL config + QR codes (Phase 5) |
-| AI provider | Implemented (`backend/src/llm/`), including role routing, the `llm` reranker and the `claude-code` subscription provider | `fastembed`/`llamacpp` rerankers (Phase 1) |
-| AI research | H1–H5, verifier, dispute log and challenger implemented over web evidence (§H6) | RHP-grounded evidence (Phase 2), review queue, evaluation set |
-| Local models | Pulled and GPU-verified (§P); usable for every role except web research | Ollama `keep_alive=0` challenger loading |
-| Automation | Daily scheduled scrape → analyse → research → PDF → email (`scheduled-run.ps1`) | Health alerts, retention, email delivery log |
-| Post-listing tracking | Not implemented | Price/outcome tables + calibration (beyond Phase 5) |
-| SME module | Checklist only | Dedicated scoring + report block |
+`claude-code` (subscription) is personal use only: it strips
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, caps calls at
+`LLM_MAX_CONCURRENCY` (2) and reports the login in `/api/health`. Multi-user
+or commercial use goes through `anthropic` with the same model ids. A local
+fallback can pin a model, e.g. `LLM_FALLBACK_PROVIDERS=ollama=qwen3.5:9b-q4_K_M`.
